@@ -1308,9 +1308,12 @@ conversation; a turn is, from its prompt to its end."
               (with-current-buffer shell
                 (setq drover-agent-shell--created opened)
                 (map-put! (map-elt agent-shell--state :session) :id id)
-                ;; The conversation replayed as it loads.
+                ;; The conversation replayed as it loads, inside the request loading it.
+                (map-put! agent-shell--state :active-requests (list (list (cons :method "session/load"))))
                 (map-put! agent-shell--state :last-activity-time (seconds-to-time (+ opened 3))))
               (drover-agent-shell-test-emit shell 'agent-message-chunk :text-chunk "The export…")
+              (with-current-buffer shell
+                (map-put! agent-shell--state :active-requests nil))
               (should (eql (drover-session-created (session)) start))
               (should (eql (drover-session-updated (session)) (+ start 5)))
               ;; A turn.
@@ -1600,6 +1603,76 @@ or dismissed, nor what runs out of a command, nor drover's own send."
           (drover-agent-shell-test-emit shell 'input-submitted :prompt "typed")
           (drover-agent-shell--submit shell "sent")))
       (should (equal noted '((t "typed" t nil)))))))
+
+(ert-deftest drover-agent-shell-test-unprompted-turn ()
+  "A turn the agent begins of its own, out of any prompt, works until it ends.
+Claude's agent goes on so once work it left running in the background
+reports back: it tells the turn's end, else the turn is taken as ended
+once quiet.  A call that ran on past the turn is the work it left
+running, and its updates are no turn; a replay comes inside the request
+loading it."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code))
+          (timers nil))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_time _repeat function &rest arguments)
+                   (let ((timer (timer-create)))
+                     (timer-set-function timer function arguments)
+                     (push timer timers)
+                     timer))))
+        (cl-flet ((background () (drover-session-background (drover-agent-shell-test-session shell)))
+                  (fire () (let ((timer (buffer-local-value 'drover-agent-shell--quiet-timer shell)))
+                             (apply (timer--function timer) (timer--args timer)))))
+          ;; A turn launches a subagent, which runs on past it.
+          (drover-agent-shell-test-emit shell 'input-submitted :prompt "Probe it")
+          (with-current-buffer shell
+            (map-put! agent-shell--state :tool-calls
+                      (list (list "call_1" (cons :status "in_progress") (cons :title "Probe")))))
+          (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+          (should (equal (drover-agent-shell-test-status shell)
+                         '(done "Waiting for a task in the background: Probe" nil)))
+          (should (equal (background) '("Probe")))
+          (should (drover-session-busy-p (drover-agent-shell-test-session shell)))
+          ;; The subagent's progress is its own.
+          (drover-agent-shell-test-emit shell 'tool-call-update :tool-call-id "call_1"
+                                        :tool-call '((:status . "in_progress")))
+          (should (eq (car (drover-agent-shell-test-status shell)) 'done))
+          ;; Its report given, the agent speaks of its own.
+          (drover-agent-shell-test-emit shell 'agent-message-chunk :text-chunk "The probe found it.")
+          (should (equal (drover-agent-shell-test-status shell)
+                         '(working "going on with what its background work reported" nil)))
+          (should-not (background))
+          (drover-agent-shell-test-emit shell 'usage-update :meta '((_claude/model . "claude-haiku-5-5")))
+          (should (eq (car (drover-agent-shell-test-status shell)) 'working))
+          (with-current-buffer shell
+            (map-put! agent-shell--state :tool-calls
+                      (list (list "call_1" (cons :status "completed") (cons :title "Probe")))))
+          (drover-agent-shell-test-emit shell 'usage-update
+                                        :meta '((_claude/origin (kind . "task-notification"))))
+          (should (equal (drover-agent-shell-test-status shell) '(done nil nil)))
+          (should-not (background))
+          (should-not (drover-session-busy-p (drover-agent-shell-test-session shell)))
+          ;; Seen, then another such turn, which goes quiet.
+          (drover-agent-shell--mark-seen (drover-agent-shell-test-session shell))
+          (drover-agent-shell-test-emit shell 'tool-call-update :tool-call-id "call_2"
+                                        :tool-call '((:status . "pending")))
+          (should (eq (car (drover-agent-shell-test-status shell)) 'working))
+          (should (memq (buffer-local-value 'drover-agent-shell--quiet-timer shell) timers))
+          (fire)
+          (should (equal (drover-agent-shell-test-status shell) '(done nil nil)))
+          ;; A replay, inside the request loading it, is no turn.
+          (drover-agent-shell--mark-seen (drover-agent-shell-test-session shell))
+          (with-current-buffer shell
+            (map-put! agent-shell--state :active-requests (list (list (cons :method "session/load")))))
+          (drover-agent-shell-test-emit shell 'agent-message-chunk :text-chunk "Earlier reply")
+          (should (eq (car (drover-agent-shell-test-status shell)) 'idle))
+          (with-current-buffer shell
+            (map-put! agent-shell--state :active-requests nil))
+          ;; A prompt submitted during such a turn makes it the user's.
+          (drover-agent-shell-test-emit shell 'agent-message-chunk :text-chunk "Again")
+          (drover-agent-shell-test-emit shell 'input-submitted :prompt "Stop")
+          (should (eq (buffer-local-value 'drover-agent-shell--in-turn shell) t))
+          (should-not (buffer-local-value 'drover-agent-shell--quiet-timer shell)))))))
 
 (ert-deftest drover-agent-shell-test-status-ended-turns ()
   "A turn ending unseen is done or failed until seen; a cancelled one is not."

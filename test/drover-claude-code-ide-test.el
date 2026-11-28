@@ -1476,6 +1476,38 @@ background, the session works."
           (should (equal (drover-session-detail session)
                          "Waiting for a task in the background: npm run dev")))))))
 
+(ert-deftest drover-claude-code-ide-test-turn-left-running-unrecorded ()
+  "A terminal telling no tasks has the transcript tell the work its turn left running.
+As in vterm or eat, which have no program status records: the CLI busy,
+its turn ended, and tasks its process started not ended."
+  (drover-claude-code-ide-test-compacting
+    (let* ((start clock)
+           (file (drover-fixture-claude "v1" project))
+           (terminal (drover-claude-code-ide-test-terminal "*claude* vterm" :directory project
+                                                           :mode 'vterm-mode)))
+      (with-current-buffer terminal
+        (setq-local ghostel--pid 12345)
+        (setq-local drover-claude-code-ide-session-id "v1"))
+      (cl-flet ((session () (drover-claude-code-ide-test-session terminal)))
+        (setq drover-claude-code-ide-test-process-records
+              `((12345 (status . "busy") (startedAt . ,(truncate (* 1000 (- start 30)))))))
+        (apply #'drover-fixture-claude-append file
+               (append (list (drover-fixture-claude-user "v1" project (+ start 1) "Serve it"))
+                       (drover-fixture-claude-launch
+                        "v1" project (+ start 2) "toolu_dev" :backgroundTaskId "bdev00002")))
+        (scan)
+        (should (eq (drover-session-status (session)) 'working))
+        (setq clock (+ start 10))
+        (drover-fixture-claude-append file (drover-fixture-claude-assistant "v1" project (+ start 10) "Serving."))
+        (scan)
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'done))
+          (should (equal (drover-session-background session) '("Start the dev server"))))
+        ;; Tasks of a process before this one never report back.
+        (setq drover-claude-code-ide-test-process-records
+              `((12345 (status . "busy") (startedAt . ,(truncate (* 1000 (+ start 20)))))))
+        (should (eq (drover-session-status (session)) 'working))))))
+
 (ert-deftest drover-claude-code-ide-test-background-shell ()
   "A shell left running ends the turn, acknowledged or not: the CLI tells it once no turn runs.
 The session is done, then idle once seen, the shell its work left

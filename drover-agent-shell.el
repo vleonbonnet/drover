@@ -95,7 +95,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 34))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 37))
   (load "drover-core" nil t))
 
 ;; Drover does not require agent-shell, so this file compiles without
@@ -215,7 +215,31 @@ nil for a shell drover followed late under a name of the user's.")
   "When the running turn of this shell was submitted, as a float time.")
 
 (defvar-local drover-agent-shell--in-turn nil
-  "Non-nil from a prompt this shell submitted until its turn ends.")
+  "Non-nil while a turn of this shell runs.
+t from a prompt it submitted until its turn ends; `unprompted' for a
+turn its agent began of its own, out of any prompt, as Claude's does
+once background work reports back (see
+`drover-agent-shell--note-out-of-turn').")
+
+(defvar-local drover-agent-shell--running-calls nil
+  "The tool calls of this shell that ran on as its last turn ended.
+Their identifiers: a subagent run in the background goes on past the
+turn, its updates arriving out of turn, which are no turn of the
+agent's.")
+
+(defvar-local drover-agent-shell--launched nil
+  "Non-nil once a turn of this shell started work in the background.
+Its engine's records are then asked what still runs (see
+`drover-agent-shell--background').")
+
+(defvar-local drover-agent-shell--quiet-timer nil
+  "Timer ending this shell's unprompted turn once it goes quiet, or nil.")
+
+(defconst drover-agent-shell--quiet-wait 30
+  "Seconds without a word of its agent after which an unprompted turn ended.
+A turn the agent begins of its own has no response to end it: Claude's
+tells its end (see `drover-agent-shell--turn-end-meta-p'), others are
+taken as ended once quiet that long.")
 
 (defvar-local drover-agent-shell--activity nil
   "When a turn of this shell's conversation last did something here, or nil.
@@ -947,6 +971,9 @@ The value is a plist of :status, :since, :detail and :requests, as
                  :since (seq-some #'car requests)
                  :requests (mapcar #'cdr requests))))
         ('busy (list :status 'working :since drover-agent-shell--turn-start))
+        ((guard (eq drover-agent-shell--in-turn 'unprompted))
+         (list :status 'working :since drover-agent-shell--turn-start
+               :detail "going on with what its background work reported"))
         (_ (if outcome
                (list :status (plist-get outcome :status)
                      :since (plist-get outcome :time)
@@ -1002,6 +1029,7 @@ again receives it whole, which is no activity of the conversation."
            (times (drover-followed-times engine engine-id drover-agent-shell--created
                                          (drover-agent-shell--last-activity)))
            (effort (drover-agent-shell--effort state))
+           (background (drover-agent-shell--background state engine engine-id))
            ;; Its provider, context and cache, as recorded, when the shell
            ;; does not tell them.
            (run (drover-recorded-run engine engine-id)))
@@ -1023,7 +1051,10 @@ again receives it whole, which is no activity of the conversation."
        :effort (car effort)
        :effort-default (cdr effort)
        :provider-name (or (drover-agent-shell--provider state) (plist-get run :provider-name))
-       :detail (plist-get status :detail)
+       :detail (or (plist-get status :detail)
+                   (and (memq (plist-get status :status) '(done idle))
+                        (drover-background-detail background)))
+       :background background
        :engine engine
        :engine-id engine-id
        run))))
@@ -1111,6 +1142,7 @@ viewport does."
            (drover-agent-shell--handed-back (if (eq kind 'input-submitted) 'prompt 'answer)))))
       (pcase kind
         ('input-submitted
+         (drover-agent-shell--stop-quiet-timer)
          (setq drover-agent-shell--outcome nil
                drover-agent-shell--turn-start (float-time)
                drover-agent-shell--in-turn t
@@ -1135,7 +1167,8 @@ viewport does."
         ('file-write
          (drover-agent-shell--note-change (map-elt data :path)))
         ('turn-complete
-         (setq drover-agent-shell--request-times nil)
+         (setq drover-agent-shell--request-times nil
+               drover-agent-shell--running-calls (drover-agent-shell--unfinished-calls agent-shell--state))
          (drover-agent-shell--end-activity)
          (let ((reason (map-elt data :stop-reason)))
            (drover-agent-shell--held-turn-end reason)
@@ -1173,6 +1206,7 @@ viewport does."
          (unless (drover-agent-shell--initialized-p (current-buffer))
            (setq drover-agent-shell--start-error "session choice cancelled")))
         ('clean-up
+         (drover-agent-shell--stop-quiet-timer)
          ;; Prompts set aside, which agent-shell did not count as queued
          ;; before its shell went.
          (when (drover-keep-unsent drover-agent-shell--held (current-buffer))
@@ -1182,6 +1216,8 @@ viewport does."
          (setq drover-agent-shell--outcome nil
                drover-agent-shell--request-times nil
                drover-agent-shell--in-turn nil)))
+      (drover-agent-shell--note-launch kind data)
+      (drover-agent-shell--note-out-of-turn kind data agent-shell--state)
       ;; Initialization went on, so it had not failed for good.
       (when (string-prefix-p "init-" (symbol-name kind))
         (setq drover-agent-shell--start-error nil))
@@ -1194,6 +1230,114 @@ viewport does."
         (drover-agent-shell--models-changed))
       (when (eq kind 'input-submitted)
         (drover-agent-shell--sent-text (map-elt data :prompt))))))
+
+(defun drover-agent-shell--unfinished-calls (state)
+  "Return the identifiers of the tool calls of STATE still running."
+  (seq-keep (lambda (entry)
+              (and (member (map-elt (cdr entry) :status) '("pending" "in_progress"))
+                   (car entry)))
+            (map-elt state :tool-calls)))
+
+(defun drover-agent-shell--note-launch (kind data)
+  "Note a tool call, an event of KIND with DATA, that started background work.
+Claude's agent tells it in the call's metadata: the identifier of a
+shell run in the background, or a subagent launched to run on."
+  (when (eq kind 'tool-call-update)
+    (let ((response (map-nested-elt (map-elt data :meta) '(claudeCode toolResponse))))
+      (when (and (listp response)
+                 (or (map-elt response 'backgroundTaskId)
+                     (equal (map-elt response 'status) "async_launched")))
+        (setq drover-agent-shell--launched t)))))
+
+(defun drover-agent-shell--turn-end-meta-p (data)
+  "Return non-nil when the usage update DATA tells the end of a turn.
+Claude's agent tells, as a turn ends, what began it (`_claude/origin'):
+the user, or a task's notification for a turn of its own."
+  (and (assq '_claude/origin (map-elt data :meta)) t))
+
+(defun drover-agent-shell--note-out-of-turn (kind data state)
+  "Follow a turn of the current shell's agent that no prompt began.
+An event of KIND with DATA arrived, STATE the shell's.  The agent
+speaking, or starting a tool call, while the shell has no request out
+begins one: Claude's goes on so once work it left running in the
+background reports back.  Updates of a call that ran on past the last
+turn are that work's, a replayed conversation comes inside the request
+loading it, and a shell not started yet has nothing to tell.  The turn
+ends as the agent tells (see `drover-agent-shell--turn-end-meta-p'), or
+once quiet for `drover-agent-shell--quiet-wait' seconds."
+  (cond
+   ((and (eq drover-agent-shell--in-turn 'unprompted)
+         (eq kind 'usage-update) (drover-agent-shell--turn-end-meta-p data))
+    (drover-agent-shell--end-unprompted))
+   ((and (memq kind '(agent-message-chunk tool-call-update permission-request elicitation-request))
+         (not (eq drover-agent-shell--in-turn t))
+         (not (map-elt state :active-requests))
+         (drover-agent-shell--initialized-p (current-buffer))
+         (not (and (eq kind 'tool-call-update)
+                   (member (map-elt data :tool-call-id) drover-agent-shell--running-calls))))
+    (unless drover-agent-shell--in-turn
+      (setq drover-agent-shell--outcome nil
+            drover-agent-shell--in-turn 'unprompted
+            drover-agent-shell--turn-start (float-time)
+            drover-agent-shell--activity drover-agent-shell--turn-start
+            drover-agent-shell--prompt nil
+            drover-agent-shell--reply nil
+            drover-agent-shell--reply-open nil
+            drover-agent-shell--written nil)
+      (drover-backend-changed 'agent-shell drover-agent-shell--id))
+    (drover-agent-shell--arm-quiet-timer))))
+
+(defun drover-agent-shell--arm-quiet-timer ()
+  "End the current shell's unprompted turn once its agent is quiet a while.
+See `drover-agent-shell--quiet-wait'."
+  (drover-agent-shell--stop-quiet-timer)
+  (let ((buffer (current-buffer)))
+    (setq drover-agent-shell--quiet-timer
+          (run-at-time drover-agent-shell--quiet-wait nil
+                       (lambda ()
+                         (drover-with-reporting "agent-shell turn"
+                           (when (buffer-live-p buffer)
+                             (with-current-buffer buffer
+                               (setq drover-agent-shell--quiet-timer nil)
+                               (when (and (eq drover-agent-shell--in-turn 'unprompted)
+                                          (not (map-elt agent-shell--state :active-requests)))
+                                 (drover-agent-shell--end-unprompted))))))))))
+
+(defun drover-agent-shell--stop-quiet-timer ()
+  "Stop the timer ending the current shell's unprompted turn, if any."
+  (when (timerp drover-agent-shell--quiet-timer)
+    (cancel-timer drover-agent-shell--quiet-timer))
+  (setq drover-agent-shell--quiet-timer nil))
+
+(defun drover-agent-shell--end-unprompted ()
+  "End the current shell's unprompted turn, done, or failed as its records tell."
+  (drover-agent-shell--stop-quiet-timer)
+  (let ((ended (plist-get (drover-recorded-turn (drover-agent-shell--engine)
+                                                (map-nested-elt agent-shell--state '(:session :id)))
+                          :ended)))
+    (setq drover-agent-shell--running-calls (drover-agent-shell--unfinished-calls agent-shell--state))
+    (drover-agent-shell--end-activity)
+    (if (eq (plist-get ended :outcome) 'failed)
+        (drover-agent-shell--end-turn 'failed (plist-get ended :error))
+      (drover-agent-shell--end-turn 'done nil))
+    (drover-backend-changed 'agent-shell drover-agent-shell--id)))
+
+(defun drover-agent-shell--background (state engine engine-id)
+  "Return the work the current shell's ended turn left running, or nil.
+One line each.  STATE is the shell's, ENGINE-ID its conversation of
+ENGINE.  None while a turn runs or waits for the user.  Once a turn of
+the shell started work in the background, its engine's records tell
+what still runs, since the shell started (see `drover-recorded-turn');
+else, as any agent tells it, the tool calls that ran on past the turn,
+by their titles."
+  (unless (or drover-agent-shell--in-turn (memq (ignore-errors (agent-shell-status)) '(busy blocked)))
+    (or (and drover-agent-shell--launched
+             (plist-get (drover-recorded-turn engine engine-id drover-agent-shell--created) :background))
+        (seq-keep (lambda (id)
+                    (let ((call (map-elt (map-elt state :tool-calls) id)))
+                      (and (member (map-elt call :status) '("pending" "in_progress"))
+                           (or (drover-bound-line (map-elt call :title)) "background task"))))
+                  drover-agent-shell--running-calls))))
 
 (defun drover-agent-shell--sent-text (text)
   "Note TEXT, a prompt the user submitted to the current shell.

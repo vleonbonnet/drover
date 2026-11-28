@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 36
+(defconst drover-core-generation 37
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -2003,6 +2003,18 @@ PROPERTIES is a plist of:
              nil when it knows none.  It must answer at once.  A front
              end following the conversation takes them from there (see
              `drover-recorded-run').
+ :recorded-turn
+             Function of an engine identifier and a time SINCE, or nil,
+             returning how the conversation's newest turn stands, as
+             recorded, a plist, or nil when it knows nothing: :ended,
+             the turn's end, a plist of :outcome (`done' or `failed'),
+             :ended (its time) and :error, or nil while it runs;
+             :current, nil while what was recorded since is not read
+             yet; :background, the work it started in the background
+             at SINCE or after and not known to have ended, one line
+             each.  It must answer at once.  A front end that cannot
+             tell a turn left work running asks it (see
+             `drover-recorded-turn').
  :recorded-title
              Function of an engine identifier returning the title of
              that conversation as recorded, a string, or nil when it
@@ -2521,6 +2533,19 @@ come first and win."
                             (run (drover-with-reporting "recorded run"
                                    (funcall function engine-id))))
                   (and (plistp run) run)))
+              (drover--recording-backends engine))))
+
+(defun drover-recorded-turn (engine engine-id &optional since)
+  "Return how ENGINE's conversation ENGINE-ID's newest turn stands, as recorded.
+The plist the first backend recording ENGINE that tells returns, or nil
+\(see :recorded-turn in `drover-register-backend'): SINCE, a float time,
+leaves out work started before, as by a process gone since."
+  (when (and engine engine-id)
+    (seq-some (lambda (backend)
+                (when-let* ((function (drover-backend-property backend :recorded-turn))
+                            (turn (drover-with-reporting "recorded turn"
+                                    (funcall function engine-id since))))
+                  (and (plistp turn) turn)))
               (drover--recording-backends engine))))
 
 (defun drover-recorded-title (engine engine-id)

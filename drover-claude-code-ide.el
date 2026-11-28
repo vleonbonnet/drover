@@ -640,41 +640,48 @@ end, and BACKGROUND that work (see `drover-claude-code-ide--left-running')."
                                     :msg (if (equal status "shell") "Waiting for background shell" "Working")))))
                      (t entries))))
     (if (eq (drover-claude-code-ide--state-of live) 'working)
-        (or (drover-claude-code-ide--left-running records status) (list live))
+        (or (drover-claude-code-ide--left-running
+             records status (let ((started (alist-get 'startedAt record)))
+                              (and (numberp started) (/ started 1000.0))))
+            (list live))
       (setq-local drover-claude-code-ide--turn-ended nil)
       (list live))))
 
-(defun drover-claude-code-ide--background-work (records status)
+(defun drover-claude-code-ide--background-work (records status &optional started)
   "Return the work the CLI runs in the background, one line each, oldest first.
 RECORDS are the terminal's program status records, newest first: each
 working but the root, the program's own, is a task of the CLI's, a
-subagent or a shell, which its title names.  STATUS, the process
-record's, is \"shell\" while a shell runs in the background, which a
-terminal without records does not tell otherwise."
+subagent or a shell, which its title names.  A terminal without any,
+vterm's or eat's, has its conversation's transcript tell the tasks the
+CLI's process, which STARTED at that float time, began and did not end
+\(see `drover-claude-code-transcripts-background').  STATUS, the process
+record's, is \"shell\" while a shell runs in the background."
   (or (nreverse (seq-keep (lambda (entry)
                             (and (not (equal (car entry) ""))
                                  (eq (plist-get (cdr entry) :state) 'working)
                                  (or (drover-bound-line (plist-get (cdr entry) :title))
                                      "background task")))
                           records))
+      (and (null records) started drover-claude-code-ide-session-id
+           (drover-claude-code-transcripts-background drover-claude-code-ide-session-id started))
       (and (equal status "shell") (list "background shell"))))
 
-(defun drover-claude-code-ide--left-running (records status)
+(defun drover-claude-code-ide--left-running (records status &optional started)
   "Return (ENTRIES . BACKGROUND) of a turn ended with work left running, or nil.
 The CLI works on as its turn ends while work it began in the background
 runs, a subagent or a shell, which RECORDS, the terminal's program
-status records, and STATUS, its process record's, tell (see
-`drover-claude-code-ide--background-work').  It waits for that work, as
-it would for the user: once the work reports back, its agent goes on
-with the report, in a turn of its own.  The turn ended when the
-conversation's transcript tells so, or when STATUS is \"shell\", which
-the CLI tells only once no turn runs.  ENTRIES are then a record of that
-end, done, or an error as an error of the API ended it, and BACKGROUND
-is the work.  A transcript changed since read tells nothing yet: the
-terminal stands as it did when last read (see
+status records, and STATUS, its process record's, of a process STARTED
+at that float time, tell (see `drover-claude-code-ide--background-work').
+It waits for that work, as it would for the user: once the work reports
+back, its agent goes on with the report, in a turn of its own.  The
+turn ended when the conversation's transcript tells so, or when STATUS
+is \"shell\", which the CLI tells only once no turn runs.  ENTRIES are
+then a record of that end, done, or an error as an error of the API
+ended it, and BACKGROUND is the work.  A transcript changed since read
+tells nothing yet: the terminal stands as it did when last read (see
 `drover-claude-code-ide--turn-ended'), so that a turn the CLI began
 since never shows as ended."
-  (let ((work (drover-claude-code-ide--background-work records status))
+  (let ((work (drover-claude-code-ide--background-work records status started))
         (id drover-claude-code-ide-session-id))
     (if (not (and work id))
         (setq-local drover-claude-code-ide--turn-ended nil)

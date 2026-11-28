@@ -871,6 +871,80 @@ archived, and come back under it as it is restored."
         (should-not (drover-supports-p b2 :delete))
         (should (drover-supports-p b3 :delete))))))
 
+(defun drover-claude-code-transcripts-test-told (id project time origin text)
+  "Return the record the CLI gives conversation ID in PROJECT at TIME, from ORIGIN.
+A message of the user's side saying TEXT, ORIGIN a plist."
+  (drover-fixture-line
+   :parentUuid :null :isSidechain :false :type "user" :origin origin
+   :message (list :role "user" :content text)
+   :uuid (format "%s-n%d" id (truncate time)) :timestamp (drover-fixture-time time)
+   :cwd project :sessionId id))
+
+(ert-deftest drover-claude-code-transcripts-test-background-tasks ()
+  "The transcript tells the work a conversation started in the background, until it ends.
+A shell's call names it by its description, a subagent by its own; a
+notification with a status, or a subagent's report handed back, ends
+it, one without a status does not.  Work a process before the one now
+running started is left out.  A session another terminal runs, busy,
+whose turn ended with work left is done, the work its background."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (start 1790000100.0)
+           (file (drover-fixture-claude "tasks" project)))
+      (apply #'drover-fixture-claude-append file
+             (append (list (drover-fixture-claude-user "tasks" project start "Serve and probe it"))
+                     (drover-fixture-claude-launch
+                      "tasks" project (+ start 1) "toolu_dev" :backgroundTaskId "bdev00001")
+                     (list (drover-fixture-line
+                            :parentUuid :null :isSidechain :false :type "user"
+                            :message (list :role "user" :content (vector (list :tool_use_id "toolu_probe"
+                                                                               :type "tool_result"
+                                                                               :content "Async agent launched")))
+                            :toolUseResult (list :status "async_launched" :agentId "aprobe00000000001"
+                                                 :description "Probe the login")
+                            :timestamp (drover-fixture-time (+ start 3)) :cwd project :sessionId "tasks")
+                           (drover-fixture-claude-assistant "tasks" project (+ start 5) "Both run."))))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-background "tasks")
+                     '("Start the dev server" "Probe the login")))
+      (should (equal (drover-claude-code-transcripts-background "tasks" (+ start 2.5 10)) '("Probe the login")))
+      (should-not (drover-claude-code-transcripts-background "tasks" (+ start 100)))
+      ;; Another terminal runs it, busy as the subagent runs.
+      (drover-claude-code-transcripts--agents-listed
+       (drover-claude-code-transcripts--parse-agents
+        (format "[{\"kind\":\"interactive\",\"sessionId\":\"tasks\",\"status\":\"busy\",\"startedAt\":%d}]"
+                (truncate (* 1000 (- start 60))))))
+      (drover-changed-now)
+      (let ((session (drover-find 'claude-code "tasks")))
+        (should (memq (drover-session-status session) '(done idle)))
+        (should (equal (drover-session-background session) '("Start the dev server" "Probe the login")))
+        (should (drover-session-busy-p session)))
+      ;; The subagent's end, and a shell's check-in, which tells none.
+      (drover-fixture-claude-append
+       file
+       (drover-claude-code-transcripts-test-told
+        "tasks" project (+ start 50) '(:kind "task-notification")
+        "<task-notification>\n<task-id>aprobe00000000001</task-id>\n<status>completed</status>\n<result>Found <task-id>bdev00001</task-id></result>\n</task-notification>")
+       (drover-claude-code-transcripts-test-told
+        "tasks" project (+ start 51) '(:kind "task-notification")
+        "<task-notification>\n<task-id>bdev00001</task-id>\n<summary>still running</summary>\n</task-notification>")
+       (drover-fixture-claude-assistant "tasks" project (+ start 55) "The probe is done."))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-background "tasks") '("Start the dev server")))
+      ;; Busy in a turn the transcript tells running: it works.
+      (drover-fixture-claude-append file (drover-fixture-claude-user "tasks" project (+ start 60) "Again"))
+      (drover-claude-code-transcripts-test-scan)
+      (drover-changed-now)
+      (should (eq (drover-session-status (drover-find 'claude-code "tasks")) 'working))
+      ;; A report handed back ends the work too.
+      (drover-fixture-claude-append
+       file
+       (drover-claude-code-transcripts-test-told
+        "tasks" project (+ start 70) '(:kind "peer" :handback t :senderTaskId "bdev00001") "done")
+       (drover-fixture-claude-assistant "tasks" project (+ start 75) "All done."))
+      (drover-claude-code-transcripts-test-scan)
+      (should-not (drover-claude-code-transcripts-background "tasks")))))
+
 (ert-deftest drover-claude-code-transcripts-test-interactive-agent-status ()
   "Interactive sessions report status; a shell left running ends the turn, its work told."
   (drover-claude-code-transcripts-test-with

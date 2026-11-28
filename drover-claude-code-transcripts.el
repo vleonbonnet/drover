@@ -91,7 +91,7 @@
 (require 'drover-command)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 36))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 37))
   (load "drover-core" nil t))
 
 (declare-function drover-claude-code-ide-fork "drover-claude-code-ide" (session-id directory))
@@ -524,6 +524,94 @@ left out.  Its other titles are read apart (see
                                               (or activity (nth 2 turn)))))))
     data))
 
+(defconst drover-claude-code-transcripts--task-regexp
+  "\"backgroundTaskId\"\\|\"async_launched\"\\|<task-notification>\\|\"handback\":true"
+  "What the records of a background task's start or end hold.")
+
+(defconst drover-claude-code-transcripts--task-limit 20
+  "How many background tasks of a conversation are followed at most, the newest.")
+
+(defun drover-claude-code-transcripts--tool-use-title (id beg end)
+  "Return the title of the tool call ID between BEG and END, or nil.
+That is its input's description, else its command, as the CLI shows a
+call: found in the reply that made it, before its result."
+  (save-excursion
+    (goto-char end)
+    (when (search-backward (format "\"id\":\"%s\"" id) beg t)
+      (when-let* ((record (drover-transcript-line))
+                  (content (alist-get 'content (alist-get 'message record)))
+                  ((listp content))
+                  (call (seq-find (lambda (block)
+                                    (and (drover-json-object-p block) (equal (alist-get 'id block) id)))
+                                  content))
+                  (input (alist-get 'input call)))
+        (seq-some (lambda (key)
+                    (let ((value (alist-get key input)))
+                      (and (stringp value) (not (string-blank-p value)) (drover-transcript-text value))))
+                  '(description command))))))
+
+(defun drover-claude-code-transcripts--ended-tasks (text)
+  "Return the identifiers of the tasks whose end the notifications in TEXT tell.
+Each <task-notification> with a <task-id> and a <status>; the report
+after its <result> is the model's to read, and never looked into."
+  (let ((ids nil)
+        (start 0))
+    (while (string-match "<task-notification>\\(\\(?:.\\|\n\\)*?\\)</task-notification>" text start)
+      (let ((body (car (split-string (match-string 1 text) "<result>"))))
+        (setq start (match-end 0))
+        (when (and (string-match "<status>[ \t\n]*[^< \t\n]" body)
+                   (string-match "<task-id>[ \t\n]*\\([^< \t\n]+\\)" body))
+          (push (match-string 1 body) ids))))
+    ids))
+
+(defun drover-claude-code-transcripts--tasks (beg end tasks)
+  "Return TASKS with what the records between BEG and END tell of background work.
+TASKS, and the value, are the background tasks of the conversation not
+known to have ended, oldest first, as (ID :title TITLE :launched TIME):
+a subagent or a shell its agent started in the background, from the
+result of the call that started it, until a notification tells the
+task's end, with a status, or the subagent hands its report back.  A
+notification without a status comes while the task runs.  The newest
+`drover-claude-code-transcripts--task-limit' are kept."
+  (cl-flet ((start (id title time)
+              (setq tasks (append (assoc-delete-all id tasks) (list (list id :title title :launched time)))))
+            (end (id) (setq tasks (assoc-delete-all id tasks))))
+    (save-excursion
+      (goto-char beg)
+      (while (re-search-forward drover-claude-code-transcripts--task-regexp end t)
+        (when-let* ((record (drover-transcript-line))
+                    ((equal (alist-get 'type record) "user"))
+                    ((not (alist-get 'isSidechain record))))
+          (let* ((result (alist-get 'toolUseResult record))
+                 (origin (alist-get 'origin record))
+                 (content (alist-get 'content (alist-get 'message record)))
+                 (time (drover-transcript-time (alist-get 'timestamp record))))
+            (cond
+             ((and (drover-json-object-p result) (stringp (alist-get 'backgroundTaskId result)))
+              (let ((use (and (listp content)
+                              (seq-some (lambda (block)
+                                          (and (drover-json-object-p block) (alist-get 'tool_use_id block)))
+                                        content))))
+                (start (alist-get 'backgroundTaskId result)
+                       (or (and (stringp use)
+                                (drover-claude-code-transcripts--tool-use-title
+                                 use (point-min) (line-beginning-position)))
+                           "background shell")
+                       time)))
+             ((and (drover-json-object-p result) (equal (alist-get 'status result) "async_launched")
+                   (stringp (alist-get 'agentId result)))
+              (start (alist-get 'agentId result)
+                     (or (drover-transcript-text (alist-get 'description result)) "background agent")
+                     time))
+             ((and (drover-json-object-p origin) (eq (alist-get 'handback origin) t)
+                   (stringp (alist-get 'senderTaskId origin)))
+              (end (alist-get 'senderTaskId origin)))
+             ((and (drover-json-object-p origin) (equal (alist-get 'kind origin) "task-notification"))
+              (when-let* ((text (drover-claude-code--texts content)))
+                (mapc #'end (drover-claude-code-transcripts--ended-tasks text)))))))
+        (forward-line 1))))
+  (last tasks drover-claude-code-transcripts--task-limit))
+
 (defun drover-claude-code-transcripts--merge (data told)
   "Return DATA with every member of TOLD, a plist, put in, nil ones included.
 How a conversation stands is told whole: an error of a turn before does
@@ -819,7 +907,10 @@ conversation again.  Its titles are read as
           (setq data (drover-claude-code-transcripts--merge
                       (drover-claude-code-transcripts--merge data recent)
                       (drover-claude-code-transcripts--settle-titles
-                       (or title (plist-get recent :ai-title)) (car names) size tail grown before))))
+                       (or title (plist-get recent :ai-title)) (car names) size tail grown before)))
+          ;; Read first, its tail alone tells them: older ones went unseen.
+          (setq data (plist-put data :tasks (drover-claude-code-transcripts--tasks
+                                             tail (point-max) (and grown (plist-get before :tasks))))))
         (setq data (plist-put data :id (drover-claude-code-transcripts--id file)))
         (let ((directory (or (plist-get data :cwd)
                              (drover-claude-code-decode-bucket
@@ -895,18 +986,26 @@ or looking at a front end following it."
 (defun drover-claude-code-transcripts--status (id &optional data)
   "Return (STATUS REQUESTS DETAIL BACKGROUND) of conversation ID, as run.
 That is as the CLI runs it.  A session \"claude agents\" lists as
-working or waiting does so, but for a shell running in the background
-once its turn ended, which the CLI tells as \"shell\": that turn is
-over, as any (see `drover-session-status'), BACKGROUND the shell.
-Else, with DATA, what was read of it, a turn that ended unseen is done,
-or failed, its error the detail (see
-`drover-claude-code-transcripts--unseen'); else it is idle."
+working or waiting does so, but once its turn ended with work left
+running in the background: that turn is over, as any (see
+`drover-session-status'), BACKGROUND the work.  The CLI tells a shell
+so as \"shell\", which it tells only once no turn runs; it tells a
+subagent as work, \"busy\", which the transcript, read up to date,
+tells apart: its newest turn ended, and tasks its process started run
+on (see `drover-claude-code-transcripts-background').  Else, with DATA,
+what was read of it, a turn that ended unseen is done, or failed, its
+error the detail (see `drover-claude-code-transcripts--unseen'); else
+it is idle."
   (let* ((agent (gethash id drover-claude-code-transcripts--agents))
          (state (and agent (or (plist-get agent :state) "")))
          (where (if (equal (plist-get agent :kind) "background")
                     "in the background"
                   "in another terminal"))
-         (background (and (equal state "shell") (list "background shell"))))
+         (tasks (and agent data (drover-claude-code-transcripts-background id (plist-get agent :started))))
+         (background (cond ((equal state "shell") (or tasks (list "background shell")))
+                           ((and tasks (eq (drover-claude-code-run-state state) 'working)
+                                 (consp (drover-claude-code-transcripts-turn-ended id)))
+                            tasks))))
     (pcase (and (not background) (drover-claude-code-run-state state))
       ('working
        (list 'working nil (concat "working " where)))
@@ -1140,6 +1239,34 @@ as a title.  Return non-nil when the transcript is to be read again."
   (when-let* ((index (drover-claude-code-transcripts--current-index))
               (file (drover-claude-code-transcripts--file id)))
     (drover-transcript-check index file)))
+
+(defun drover-claude-code-transcripts-background (id &optional since)
+  "Return the background tasks of conversation ID not known to have ended, or nil.
+One line each, oldest first, as its transcript tells them (see
+`drover-claude-code-transcripts--tasks'): those started at SINCE or
+after, a float time, when given.  The CLI ends its tasks as it exits:
+those of a process before the one running the conversation now never
+report back."
+  (when-let* ((data (drover-claude-code-transcripts--data id)))
+    (seq-keep (lambda (task)
+                (and (or (null since)
+                         (>= (or (plist-get (cdr task) :launched) 0)
+                             (- since drover-claude-code-transcripts--clock-slack)))
+                     (plist-get (cdr task) :title)))
+              (plist-get data :tasks))))
+
+(defun drover-claude-code-transcripts--recorded-turn (id &optional since)
+  "Return how the newest turn of conversation ID stands, as its transcript tells.
+A plist of :ended, what `drover-claude-code-transcripts-turn-ended'
+tells, the turn's end or nil while it runs, :current, nil while the
+transcript changed since read, and :background, its tasks started at
+SINCE or after (see `drover-claude-code-transcripts-background').  Nil
+when it was never read.  The backend's :recorded-turn."
+  (let ((ended (drover-claude-code-transcripts-turn-ended id)))
+    (when (drover-claude-code-transcripts--data id)
+      (list :ended (and (consp ended) ended)
+            :current (not (eq ended 'unknown))
+            :background (drover-claude-code-transcripts-background id since)))))
 
 (defun drover-claude-code-transcripts-turn-ended (id)
   "Return how the newest turn of conversation ID ended, as its transcript tells.
@@ -1394,7 +1521,8 @@ the older ones; the sessions Claude Code runs elsewhere are asked for."
 (defun drover-claude-code-transcripts--parse-agents (json)
   "Return the sessions JSON, the output of \"claude agents --json\", lists.
 A hash table mapping each conversation to a plist of :kind, :state,
-:short, its identifier for \"claude attach\", and :name."
+:short, its identifier for \"claude attach\", :name, and :started, when
+its process started, as a float time."
   (let ((table (make-hash-table :test #'equal)))
     (dolist (entry (let ((value (json-parse-string json :object-type 'alist :array-type 'list
                                                    :null-object nil :false-object nil)))
@@ -1404,7 +1532,9 @@ A hash table mapping each conversation to a plist of :kind, :state,
                   ((stringp id)))
         (puthash id (list :kind (alist-get 'kind entry)
                           :state (or (alist-get 'status entry) (alist-get 'state entry))
-                          :short (alist-get 'id entry) :name (alist-get 'name entry))
+                          :short (alist-get 'id entry) :name (alist-get 'name entry)
+                          :started (let ((started (alist-get 'startedAt entry)))
+                                     (and (numberp started) (/ started 1000.0))))
                  table)))
     table))
 
@@ -1640,6 +1770,7 @@ The first time, note it: replies before count as seen (see
    :recorded-times #'drover-claude-code-transcripts--times
    :recorded-run #'drover-claude-code-transcripts--recorded-run
    :recorded-title #'drover-claude-code-transcripts--recorded-title
+   :recorded-turn #'drover-claude-code-transcripts--recorded-turn
    :recorded-seen #'drover-claude-code-transcripts--recorded-seen
    :caches t
    :start #'drover-claude-code-transcripts--start

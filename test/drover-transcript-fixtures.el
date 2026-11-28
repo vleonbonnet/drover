@@ -230,6 +230,28 @@ cache of an hour and of five minutes, READ read from it, and OUTPUT."
         :cache_creation (list :ephemeral_1h_input_tokens hour :ephemeral_5m_input_tokens minutes)
         :inference_geo "" :iterations [] :speed "standard"))
 
+(defun drover-fixture-claude-launch (id project time call &rest result)
+  "Return the records of a call CALL starting background work in conversation ID.
+In PROJECT at TIME: the reply making the call, a shell's command with
+its description, then its result, RESULT the members of its
+toolUseResult."
+  (list (drover-fixture-line
+         :parentUuid :null :isSidechain :false :type "assistant"
+         :message (list :role "assistant" :model "claude-opus-5-5" :stop_reason "tool_use"
+                        :content (vector (list :type "tool_use" :id call :name "Bash"
+                                               :input (list :command "npm run dev"
+                                                            :description "Start the dev server"
+                                                            :run_in_background t))))
+         :uuid (format "%s-a%d" id (truncate time)) :timestamp (drover-fixture-time time)
+         :cwd project :sessionId id)
+        (drover-fixture-line
+         :parentUuid (format "%s-a%d" id (truncate time)) :isSidechain :false :type "user"
+         :message (list :role "user" :content (vector (list :tool_use_id call :type "tool_result"
+                                                            :content "launched")))
+         :toolUseResult result
+         :uuid (format "%s-r%d" id (truncate time)) :timestamp (drover-fixture-time (1+ time))
+         :cwd project :sessionId id)))
+
 (defun drover-fixture-claude-tool-result (id directory time)
   "Return the record of a tool's result of conversation ID in DIRECTORY at TIME."
   (drover-fixture-line
