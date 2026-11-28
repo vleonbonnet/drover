@@ -819,14 +819,6 @@ Through these tools, directly or through other sessions waiting."
               (push next stack))))))
     found))
 
-(defun drover-anvil--turn-active-p (session)
-  "Return non-nil while SESSION runs a turn, or has prompts waiting to run.
-A turn that ended with work left running in the background, such as a
-subagent, runs on: its agent goes on with the work's report, in a turn
-of its own, whose end is the result (see `drover-session-busy-p')."
-  (or (drover-session-busy-p session)
-      (> (drover-pending-prompts session) 0)))
-
 (defun drover-anvil--outcome (session)
   "Return how the turn of SESSION, ended or waiting for the user, came out, a word."
   (pcase (drover-session-status session)
@@ -843,7 +835,7 @@ to fetch the last turn's recap once it ended."
      ((null record)
       (drover-anvil--done id `((outcome . "gone") (key . ,(drover-anvil--key-of key))
                                (note . "The session is no longer live: archived, deleted, or its host gone"))))
-     ((drover-anvil--turn-active-p record)
+     ((drover-session-busy-p record)
       (drover-anvil--job-put id :active t))
      ((drover-anvil--job-get id :settling)
       (when (or (drover-anvil--details-ready-p id)
@@ -865,7 +857,7 @@ to fetch the last turn's recap once it ended."
   "Wait until the turn of the session KEY ends, or it needs the user.
 A turn that ended with work left running in the background ends once
 the session went on with the work's report (see
-`drover-anvil--turn-active-p').  TIMEOUT bounds the wait, SINCE tells
+`drover-session-busy-p').  TIMEOUT bounds the wait, SINCE tells
 which turn, RECAP whether its recap comes, as the parameters below tell.
 Emacs never waits: the client does, while Anvil polls.
 

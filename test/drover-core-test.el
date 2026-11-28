@@ -2066,6 +2066,26 @@ defines Send, and a function failing tells none."
     ;; Without a size, nothing is estimated.
     (should-not (drover-session-context-description (session :context-estimated t)))))
 
+(ert-deftest drover-test-turn-predicates ()
+  "Each question asked of a session's turn has one answer, whatever its front end."
+  (drover-test-with-backend nil
+    (pcase-dolist (`(,status ,background ,working ,open ,busy ,active)
+                   '((working nil t t t t) (retrying nil t t t t) (waiting nil nil t nil t)
+                     (done nil nil nil nil nil) (idle nil nil nil nil nil)
+                     (done ("Probe") nil nil t nil) (idle ("Probe") nil nil t nil)))
+      (let ((session (drover-test-session "s" :status status :background background)))
+        (ert-info ((format "%s %S" status background) :prefix "Session: ")
+          (should (eq (and (drover-session-working-p session) t) working))
+          (should (eq (and (drover-session-turn-open-p session) t) open))
+          (should (eq (and (drover-session-busy-p session) t) busy))
+          (should (eq (and (drover-session-active-p session) t) active)))))
+    ;; Prompts it holds keep its turn open, and it works.
+    (cl-letf (((symbol-function 'drover-pending-prompts) (lambda (_) 1)))
+      (let ((session (drover-test-session "s" :status 'idle)))
+        (should (drover-session-working-p session))
+        (should (drover-session-turn-open-p session))
+        (should (drover-session-busy-p session))))))
+
 (ert-deftest drover-test-session-record-keeps-its-layout ()
   "New slots of the session record come last, after those compiled code reads."
   (let ((slots (mapcar #'car (cdr (cl-struct-slot-info 'drover-session)))))

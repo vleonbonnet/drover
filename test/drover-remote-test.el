@@ -2860,8 +2860,7 @@ behind, it hands it nothing, said so; refused, nothing either."
             ;; As the prompt sends: the backend's :send, then the handoff noted.
             (funcall (drover-backend-property 'remote:agent :send) session "Go on" nil)
             (drover-note-handed-off session 'prompt 'drover)))
-        ;; Held until the owner answers.
-        (accept-process-output nil 0.05)
+        ;; Held until the owner answers, which no reply read yet tells.
         (should-not told)
         (drover-remote-test-wait (lambda () told))
         (drover-remote-test-wait (lambda () (seq-some (lambda (text) (string-match-p "waits on a request" text))

@@ -739,7 +739,7 @@ not loaded tells nothing yet."
   (let ((key (drover-schedule--key job)))
     (if-let* ((session (seq-find (lambda (session) (equal (drover-session-engine-key session) key))
                                  sessions)))
-        (not (memq (drover-session-status session) drover-active-statuses))
+        (not (drover-session-active-p session))
       (let ((backend (plist-get job :backend)))
         (cond ((not (memq backend (drover-backends))) nil)
               ((drover-backend-property backend :runs-in-buffer) t)
@@ -1610,7 +1610,7 @@ While its turn runs, its end is offered first."
   (let* ((session (drover-session-at-point t))
          (target (drover-schedule-target))
          (chosen (drover-schedule-read-when
-                  (and session (memq (drover-session-status session) '(working retrying)) t))))
+                  (and session (drover-session-turn-open-p session) t))))
     (drover-schedule-enqueue target chosen (drover-schedule-read-prompt (drover-schedule-default-prompt chosen)))))
 
 (defun drover-schedule-session-target (session)
@@ -1657,7 +1657,7 @@ instead.  A prompt with attachments is refused: the queue keeps text."
               (user-error "%s has no live buffer" (drover-session-display-title session))))
          (target (drover-schedule-session-target session))
          (chosen (drover-schedule-read-when
-                  (and (memq (drover-session-status session) '(working retrying)) t)))
+                  (and (drover-session-turn-open-p session) t)))
          (text (if content
                    (plist-get content :text)
                  (drover-schedule-read-prompt (drover-schedule-default-prompt chosen))))
@@ -2451,7 +2451,7 @@ prompt stands for the event's own (see `drover-schedule-define-trigger')."
               (user-error "Choose a session")))
          (target (drover-schedule-session-target session))
          (chosen (drover-schedule-read-when
-                  (and (memq (drover-session-status session) '(working retrying)) t))))
+                  (and (drover-session-turn-open-p session) t))))
     (drover-schedule-enqueue target chosen (drover-schedule-read-prompt (drover-schedule-default-prompt chosen)))))
 
 (defvar-keymap drover-schedule-list-mode-map

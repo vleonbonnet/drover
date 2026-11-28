@@ -616,7 +616,8 @@ the shell started with."
             (should-not drover-agent-shell-test--warnings)))))))
 
 (ert-deftest drover-agent-shell-test-scheduled-prompt ()
-  "A scheduled prompt waits for an initialized, idle shell with nothing typed, then is submitted."
+  "A scheduled prompt waits for an initialized shell with nothing typed, then is submitted.
+A turn running holds it back no more: the shell queues it."
   (drover-agent-shell-test-with
     (drover-agent-shell-test-with-submit
       (let* ((shell (drover-agent-shell-test-shell 'codex "later"))
@@ -630,7 +631,7 @@ the shell started with."
           (drover-agent-shell-test-initialize shell)
           (with-current-buffer shell
             (setq-local shell-maker--busy t))
-          (should (equal (drover-agent-shell--blocker session) "the agent is still busy"))
+          (should-not (equal (drover-agent-shell--blocker session) "the agent is still busy"))
           (with-current-buffer shell
             (setq-local shell-maker--busy nil))
           (should (equal (drover-agent-shell--blocker session) "the shell shows no prompt"))
@@ -650,6 +651,14 @@ the shell started with."
           (cl-letf (((symbol-function 'agent-shell-insert) (lambda (&rest _) (error "No prompt"))))
             (drover-agent-shell--deliver session "again" #'ignore (lambda (message) (setq outcome message))))
           (should (equal outcome "No prompt"))
+          ;; During a turn, the shell's queue takes it, which is told.
+          (with-current-buffer shell
+            (setq-local shell-maker--busy t))
+          (drover-agent-shell--deliver session "later" (lambda (&optional why) (setq outcome (or why 'sent))) #'ignore)
+          (should (equal outcome "queued in the shell behind its running turn"))
+          (should (member (list 'agent-shell-prompt-queue shell "later") drover-agent-shell-test--calls))
+          (with-current-buffer shell
+            (setq-local shell-maker--busy nil))
           (kill-buffer shell)
           (should (equal (drover-agent-shell--blocker session) "the shell is gone")))))))
 

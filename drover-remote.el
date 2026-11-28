@@ -2924,54 +2924,41 @@ requests, those still being performed kept until done."
 (defun drover-remote--queue-prompt (record args peer-name)
   "Queue the prompt ARGS carry for RECORD, when it cannot take it now.
 For a peer PEER-NAME sending it, ARGS holding :text and its options.  A
-session running its agent in its buffer (:runs-in-buffer) while its turn
-runs, or whose buffer cannot take a prompt now without touching what its
-input holds (its backend's :blocker), gets it from this host's queue of
-prompts (`drover-schedule'), saved there: after its turn, as a prompt
-scheduled \"when turn ends\" here is, else once it can take it.  Never
-typed over a turn, nor lost.  Return (queued . WHY) when queued, WHY a
-line telling why it waits and until when, which the answer to the peer
-carries (capability \"queued\"), and a peer of an older drover is told in
-a message \"note\"; a string saying why when it must wait but cannot be
-queued, its conversation not known yet; nil when the session takes it
-now, or drover-schedule is not there."
-  (let* ((buffer (drover-session-buffer record))
-         (running (and (drover-backend-property record :runs-in-buffer)
-                       (drover--running-p record)))
-         (blocker (and buffer (not running)
-                       (functionp (drover-backend-property record :blocker))
-                       (drover-with-reporting "remote send"
-                         (drover-backend-call record :blocker)))))
-    (when (and (or running (stringp blocker)) (require 'drover-schedule nil t))
+session whose buffer cannot take a prompt now without touching what its
+input holds (its backend's :blocker) gets it from this host's queue of
+prompts (`drover-schedule'), saved there, once it can take it; never
+lost.  A turn running holds nothing back: its front end queues or
+steers the prompt, as it does a prompt sent here.  Return (queued .
+WHY) when queued, WHY a line telling why it waits and until when, which
+the answer to the peer carries (capability \"queued\"), and a peer of an
+older drover is told in a message \"note\"; a string saying why when it
+must wait but cannot be queued, its conversation not known yet; nil
+when the session takes it now, or drover-schedule is not there."
+  (let ((blocker (and (drover-session-buffer record)
+                      (functionp (drover-backend-property record :blocker))
+                      (drover-with-reporting "remote send"
+                        (drover-backend-call record :blocker)))))
+    (when (and (stringp blocker) (require 'drover-schedule nil t))
       (require 'drover-links)
       (let* ((peer (and peer-name (drover-remote--peer peer-name)))
              (title (drover-session-display-title record))
-             (blocker (and (stringp blocker) (or (drover-bound-line blocker 200) "it is busy")))
-             (why (if running "its turn runs" blocker))
+             (blocker (or (drover-bound-line blocker 200) "it is busy"))
              (conversation (drover-links-conversation record)))
         (if (not (and peer conversation))
-            (format "%s, and its conversation is not known yet to queue the prompt" why)
+            (format "%s, and its conversation is not known yet to queue the prompt" blocker)
           (let ((target (drover-remote--schedule-target record conversation args peer))
-                (instruction (format "sent from %s" (drover-remote--label peer)))
-                (text (plist-get args :text)))
+                (instruction (format "sent from %s" (drover-remote--label peer))))
             (drover-quietly
-              (if running
-                  (drover-schedule-add-after-turn target text instruction)
-                (drover-schedule-deliver target text :origin instruction)))
-            (drover-remote--event peer 'act "queued its prompt for %s: %s" title why)
+              (drover-schedule-deliver target (plist-get args :text) :origin instruction))
+            (drover-remote--event peer 'act "queued its prompt for %s: %s" title blocker)
             (when-let* (((not (drover-remote--capable-p peer "queued")))
                         (connection (drover-remote--peer-connection peer)))
               (drover-remote--send connection
                                    (list :t "note"
-                                         :text (if running
-                                                   (format "%s runs a turn on %s: the prompt goes once it ends, queued there"
-                                                           title drover-host)
-                                                 (format "%s on %s cannot take a prompt now (%s): it goes once it can, queued there"
-                                                         title drover-host blocker)))))
+                                         :text (format "%s on %s cannot take a prompt now (%s): it goes once it can, queued there"
+                                                       title drover-host blocker))))
             (cons 'queued
-                  (if running
-                      "its turn runs: the prompt goes once it ends"
-                    (format "it cannot take a prompt now (%s): the prompt goes once it can" blocker)))))))))
+                  (format "it cannot take a prompt now (%s): the prompt goes once it can" blocker))))))))
 
 (defun drover-remote--run-soon (state)
   "Perform the actions of STATE's tasks from a timer."

@@ -353,11 +353,6 @@ conversation, loaded if need be (see `drover-load-resumer')."
         (user-error "Could not start the wrap-up of %s" title))
       entry)))
 
-(defun drover-wrap-up--busy-p (record)
-  "Return non-nil when RECORD runs a turn, or holds prompts not taken yet."
-  (or (memq (drover-session-status record) '(working retrying))
-      (> (drover-pending-prompts record) 0)))
-
 (defun drover-wrap-up--record (entry)
   "Return the record of ENTRY's session, archived or not, or nil."
   (drover-find-archived (plist-get entry :backend) (plist-get entry :session)))
@@ -371,7 +366,7 @@ conversation, loaded if need be (see `drover-load-resumer')."
       (drover-message "%s waits for your answer: its wrap-up is called off; Z again once answered"
                       (plist-get entry :title))
       (drover-wrap-up--tell entry "%s waits for an answer: its wrap-up is called off"))
-     ((and record (drover-wrap-up--busy-p record))
+     ((and record (drover-session-working-p record))
       (drover-wrap-up--set entry :state 'waiting-turn))
      (t (drover-wrap-up--send entry)))))
 
@@ -767,14 +762,14 @@ On `drover-changed-hook', and from a timer now and then."
      ((null record)
       (drover-wrap-up--drop entry)
       (drover-message "%s left before its wrap-up began" (plist-get entry :title)))
-     ((not (drover-wrap-up--busy-p record)) (drover-wrap-up--proceed entry)))))
+     ((not (drover-session-working-p record)) (drover-wrap-up--proceed entry)))))
 
 (defun drover-wrap-up--ended-p (entry record)
   "Return non-nil when the turn of ENTRY's prompt ended, as RECORD tells.
 Out of a turn, RECORD ended it once seen in one since the prompt went,
 or when its status changed and it did something since."
   (let ((mark (or (plist-get entry :mark) 0)))
-    (and (not (drover-wrap-up--busy-p record))
+    (and (not (drover-session-working-p record))
          (or (plist-get entry :active)
              (and (> (or (drover-session-since record) 0) mark)
                   (> (or (drover-session-updated record) 0) mark))))))
@@ -812,7 +807,7 @@ or when its status changed and it did something since."
                                           (if (eq (plist-get request :kind) 'question) "asks" "awaits a permission")
                                           (or (drover-bound-line (plist-get request :summary) 200) "no summary"))
                                 "it waits for you")))
-       ((drover-wrap-up--busy-p record)
+       ((drover-session-working-p record)
         (unless (plist-get entry :active)
           (drover-wrap-up--set entry :active t)))
        ((drover-wrap-up--ended-p entry record)

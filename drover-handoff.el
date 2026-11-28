@@ -272,12 +272,6 @@ nil leaves it to the agent."
 
 ;;;; Delivering
 
-(defun drover-handoff--busy-p (session)
-  "Return non-nil while SESSION runs a turn, or holds prompts not taken yet.
-A question it asks is part of its turn."
-  (or (memq (drover-session-status session) drover-active-statuses)
-      (> (drover-pending-prompts session) 0)))
-
 (defun drover-handoff--send-here (session text origin)
   "Queue TEXT for SESSION, of this host; return non-nil when it waits for a turn.
 Through the queue of scheduled prompts, named ORIGIN, out of every
@@ -285,7 +279,7 @@ window: after its turn when one runs, else now, once its buffer takes a
 prompt without touching a draft."
   ;; The queue tells what it scheduled, its whole prompt: the command tells the item.
   (let ((inhibit-message t))
-    (if (drover-handoff--busy-p session)
+    (if (drover-session-turn-open-p session)
         (progn
           (drover-schedule-for-session session "when turn ends" text
                                        (list :hidden t :origin origin))
@@ -304,7 +298,7 @@ warned of once the host answers."
     (cl-flet ((refused (why)
                 (drover-with-reporting "hand-off"
                   (drover-warn "Could not prompt %s: %s refused its prompt: %s" title host why))))
-      (if (drover-handoff--busy-p session)
+      (if (drover-session-turn-open-p session)
           (progn
             (unless (fboundp 'drover-remote-schedule-later)
               (user-error "%s runs on %s, and `drover-remote-mode' is off" title host))

@@ -990,12 +990,30 @@ when nothing else tells more."
             (if (cdr background) (format "%d tasks" (length background)) "a task")
             (string-join background ", "))))
 
+(defun drover-session-working-p (session)
+  "Return non-nil while SESSION works, waits to retry, or holds prompts not taken.
+Its agent is then at a turn the user need not answer: what is sent
+waits for it, and what judges a turn waits for its end.  A session
+waiting for the user is not: what waits for its turn's end decides of
+that itself (see `drover-session-turn-open-p')."
+  (or (memq (drover-session-status session) '(working retrying))
+      (> (drover-pending-prompts session) 0)))
+
+(defun drover-session-turn-open-p (session)
+  "Return non-nil until the turn of SESSION ended, the prompts it holds taken.
+That is while it works, waits to retry or waits for the user (see
+`drover-session-active-p'), or holds prompts not taken yet: a prompt
+for after its turn goes once it is closed."
+  (or (drover-session-active-p session)
+      (> (drover-pending-prompts session) 0)))
+
 (defun drover-session-busy-p (session)
   "Return non-nil while the result of SESSION is not in yet.
-That is while it works or waits to retry, or while its ended turn left
-work running, whose report its agent goes on with, in a turn of its own
-\(see `drover-session-background')."
-  (or (memq (drover-session-status session) '(working retrying))
+That is while it works or waits to retry, holds prompts not taken yet,
+or while its ended turn left work running, whose report its agent goes
+on with, in a turn of its own (see `drover-session-background').  A
+session waiting for the user is not busy: it waits for the user."
+  (or (drover-session-working-p session)
       (and (drover-session-background session) t)))
 
 (defun drover-session-display-title (session)
@@ -2133,7 +2151,11 @@ no scheduled prompt.
  :blocker    Function of a SESSION whose buffer is live, returning why
              that buffer cannot take a prompt now without touching
              what the user typed there, a short string, or nil once it
-             can: a draft, a turn running, a session still loading.
+             can: a draft, a session still loading.  Never a turn
+             running: every front end queues or steers a prompt given
+             during a turn, as its user's would be, and what must wait
+             for a turn's end asks drover (see
+             `drover-session-turn-open-p').
  :submit     Function of a SESSION, a TEXT, THEN and ELSE, submitting
              TEXT as a prompt now, :blocker having allowed it: THEN with
              no argument once the front end took it, or with a line

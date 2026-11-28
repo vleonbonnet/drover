@@ -588,12 +588,12 @@ shell takes it through its submission path, which reconnects first."
 
 (defun drover-agent-shell--blocker (session)
   "Say why the shell of SESSION cannot take a prompt now, or nil once it can.
-It can once initialized, idle, with nothing typed at its prompt, so
-that no draft is touched.  The backend's :blocker."
+It can once initialized, with nothing typed at its prompt, so that no
+draft is touched; a turn running queues it (see
+`drover-agent-shell--deliver').  The backend's :blocker."
   (if-let* ((buffer (drover-session-buffer session)))
       (with-current-buffer buffer
         (cond ((not (drover-agent-shell--initialized-p buffer)) "the shell has not initialized")
-              ((shell-maker-busy) "the agent is still busy")
               ((let ((start (agent-shell--prompt-input-start)))
                  (cond ((not start) "the shell shows no prompt")
                        ((not (string-blank-p (buffer-substring-no-properties start (point-max))))
@@ -602,13 +602,19 @@ that no draft is touched.  The backend's :blocker."
 
 (defun drover-agent-shell--deliver (session text then else)
   "Submit TEXT to the shell of SESSION now, then call THEN, or ELSE with a message.
-The backend's :submit."
+While a turn runs, the shell queues TEXT, to go once the turn ends, and
+THEN is told so.  The backend's :submit."
   (if-let* ((buffer (drover-session-buffer session)))
-      (let ((failure (condition-case err
-                         (progn (agent-shell-insert :shell-buffer buffer :text text :submit t :no-focus t)
-                                nil)
-                       (error (drover-error-message err)))))
-        (if failure (funcall else failure) (funcall then)))
+      (let* ((busy (with-current-buffer buffer (shell-maker-busy)))
+             (failure (condition-case err
+                          (progn (if busy
+                                     (with-current-buffer buffer (agent-shell-prompt-queue text))
+                                   (agent-shell-insert :shell-buffer buffer :text text :submit t :no-focus t))
+                                 nil)
+                        (error (drover-error-message err)))))
+        (cond (failure (funcall else failure))
+              (busy (funcall then "queued in the shell behind its running turn"))
+              (t (funcall then))))
     (funcall else "the shell is gone")))
 
 ;;;; Options of running shells
