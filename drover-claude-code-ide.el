@@ -629,9 +629,10 @@ end, and BACKGROUND that work (see `drover-claude-code-ide--left-running')."
          (state (drover-claude-code-run-state status))
          (live (cond ((eq terminal-state 'blocked) entries)
                      ((eq state 'blocked)
-                      (list (list "process" :state 'blocked
-                                  :msg (or (drover-bound-line (alist-get 'waitingFor record))
-                                           "Waiting for input"))))
+                      (let ((waiting (alist-get 'waitingFor record)))
+                        (list (list "process" :state 'blocked
+                                    :kind (drover-claude-code-wait-kind waiting)
+                                    :msg (or (drover-bound-line waiting) "Waiting for input")))))
                      ((eq terminal-state 'error) entries)
                      ((eq state 'working)
                       (if (eq terminal-state 'working)
@@ -942,11 +943,15 @@ is that work, which DETAIL tells unless it tells an error (see
                                             records)))
                nil))
         ('working
-         (let ((record (car records)))
-           (list 'working nil
-                 (or (plist-get record :msg)
-                     (when-let* ((progress (plist-get record :progress)))
-                       (format "%d%%" progress))))))
+         (if-let* ((retry (and drover-claude-code-ide-session-id
+                               (drover-claude-code-transcripts-retry drover-claude-code-ide-session-id))))
+             (list 'retrying nil (drover-retry-detail (plist-get retry :attempt) (plist-get retry :at)
+                                                      (plist-get retry :message)))
+           (let ((record (car records)))
+             (list 'working nil
+                   (or (plist-get record :msg)
+                       (when-let* ((progress (plist-get record :progress)))
+                         (format "%d%%" progress)))))))
         ('done (list (if drover-claude-code-ide--seen 'idle 'done) nil detail background))
         ('error
          (if drover-claude-code-ide--seen

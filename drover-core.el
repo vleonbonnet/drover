@@ -842,8 +842,7 @@ itself when within those, and of all the slots of a `drover-session'
 now (see `drover--whole-record'), unless `drover-brief-function' gives
 it a brief (see `drover--briefed'), `drover-changes-function' what it
 changed (see `drover--with-changes') or the user chose otherwise of its
-notifications (see `drover--with-notify'), or a failure it did not see
-outlives the turn after it (see `drover--with-unseen-failure')."
+notifications (see `drover--with-notify')."
   (if (not (drover-session-p record))
       record
     (let* ((whole (drover--whole-record record))
@@ -904,8 +903,7 @@ outlives the turn after it (see `drover--with-unseen-failure')."
                                 (plist-put (copy-sequence request) :summary (drover-bound-text summary))
                               request)))
                         requests))))
-      (drover--with-unseen-failure
-       (drover--with-notify (drover--with-changes (drover--briefed (or copy record))))))))
+      (drover--with-notify (drover--with-changes (drover--briefed (or copy record)))))))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -993,6 +991,16 @@ alone, to its peers, its phones and its desktop."
   "Return non-nil when SESSION is in the middle of a turn.
 See `drover-active-statuses'."
   (memq (drover-session-status session) drover-active-statuses))
+
+(defun drover-retry-detail (attempt at message)
+  "Return the line telling that a session waits to retry a failed request.
+ATTEMPT is the number of the retry, AT when it goes, a float time, and
+MESSAGE what failed, each nil when not known: \"retry 2 at 14:05: Rate
+limited\".  Backends give it as their record's detail while retrying."
+  (concat "retry"
+          (and attempt (format " %d" attempt))
+          (and at (concat " at " (format-time-string "%H:%M" at)))
+          (and message (concat ": " message))))
 
 (defun drover-background-detail (background)
   "Return the line telling that a session waits for BACKGROUND, or nil.
@@ -2047,7 +2055,9 @@ PROPERTIES is a plist of:
              :current, nil while what was recorded since is not read
              yet; :background, the work it started in the background
              at SINCE or after and not known to have ended, one line
-             each.  It must answer at once.  A front end that cannot
+             each; :retry, while the turn waits to retry a failed
+             request, a plist of :attempt, :at and :message.  It must
+             answer at once.  A front end that cannot
              tell a turn left work running asks it (see
              `drover-recorded-turn').
  :recorded-title
@@ -7016,34 +7026,6 @@ default.  It is this host's desktop that tells (`drover-notify-mode'),
 and the phones it pushes to (`drover-remote-push')."
   (drover-notify-chosen-p (drover--notify-root session)))
 
-(defvar drover--unseen-failures (make-hash-table :test #'equal)
-  "The failures of this host's sessions the user did not see, by session key.
-Each a record of the session as its turn failed.")
-
-(defun drover--with-unseen-failure (record)
-  "Return RECORD, or a copy failed still, as a failure it did not see was.
-A turn that failed while the user was elsewhere stays failed, its error
-the detail, until the user sees it: a turn ending done after it, such as
-a prompt queued behind it, hides nothing.  The session seen, its front
-end tells it idle, which forgets the failure; a turn running, or the
-user's answer awaited, shows as it is meanwhile.  This host's sessions
-alone: a session of another host is its owner's to tell."
-  (if (or (not (drover-session-p record)) (drover-session-host record))
-      record
-    (let ((key (drover-session-key record)))
-      (pcase (drover-session-status record)
-        ('failed (puthash key record drover--unseen-failures) record)
-        ('idle (remhash key drover--unseen-failures) record)
-        ('done
-         (if-let* ((failed (gethash key drover--unseen-failures)))
-             (let ((copy (copy-sequence record)))
-               (setf (drover-session-status copy) 'failed
-                     (drover-session-detail copy) (drover-session-detail failed)
-                     (drover-session-since copy) (drover-session-since failed))
-               copy)
-           record))
-        (_ record)))))
-
 ;;;; Seen as the user looks
 
 (defconst drover--seen-again-wait 2
@@ -7094,7 +7076,6 @@ after `drover--seen-again-wait' seconds."
                        (drover-supports-p shown :mark-seen)
                        (> (- now (gethash key drover--seen-asked 0)) drover--seen-again-wait))
               (puthash key now drover--seen-asked)
-              (remhash key drover--unseen-failures)
               (drover-backend-call shown :mark-seen))))))))
 
 (defvar drover--interrupted (make-hash-table :test #'equal)
@@ -7117,7 +7098,6 @@ them; their front end is told through :mark-seen.  For
                      (remhash key drover--interrupted))
                     ((memq (drover-session-status record) '(done failed))
                      (remhash key drover--interrupted)
-                     (remhash key drover--unseen-failures)
                      (when (drover-supports-p record :mark-seen)
                        (drover-backend-call record :mark-seen)))
                     ((eq (drover-session-status record) 'idle)
@@ -7353,8 +7333,6 @@ Interactively, SESSIONS are the selected sessions whose turn ended
 unseen, or the session at point (see `drover--selected-for')."
   (interactive (list (drover--selected-for :mark-seen #'drover--ended-unseen-p
                                            "ended a turn unseen")))
-  (dolist (session (if (drover-session-p sessions) (list sessions) sessions))
-    (remhash (drover-session-key session) drover--unseen-failures))
   (drover--act sessions :mark-seen "Marked %s seen" :verb "Marking seen"))
 
 (defun drover-preview (session callback)

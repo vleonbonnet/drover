@@ -189,7 +189,6 @@ Terminals BODY makes are killed."
          (drover-claude-code-ide-test-warnings nil)
          (drover-claude-code-ide-test-focused nil)
          (drover--seen-asked (make-hash-table :test #'equal))
-         (drover--unseen-failures (make-hash-table :test #'equal))
          (drover-claude-code-ide-test-timers nil)
          (drover-claude-code-ide-test-cancelled nil))
      (cl-letf (((symbol-function 'claude-code-ide-mcp--active-sessions)
@@ -1519,6 +1518,18 @@ its turn ended, and tasks its process started not ended."
         (setq drover-claude-code-ide-test-process-records
               `((12345 (status . "busy") (startedAt . ,(truncate (* 1000 (+ start 20)))))))
         (should (eq (drover-session-status (session)) 'working))))))
+
+(ert-deftest drover-claude-code-ide-test-wait-kind ()
+  "A terminal's live record tells what its CLI waits for, a permission or a question."
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* asks")))
+      (with-current-buffer terminal (setq-local ghostel--pid 12345))
+      (pcase-dolist (`(,waiting ,kind) '(("input needed" question) ("permission prompt" permission)
+                                         ("dialog open" permission)))
+        (setq drover-claude-code-ide-test-process-records `((12345 (status . "waiting") (waitingFor . ,waiting))))
+        (drover-claude-code-ide-test-status terminal nil)
+        (should (equal (drover-session-requests (drover-claude-code-ide-test-session terminal))
+                       `((:kind ,kind :summary ,waiting))))))))
 
 (ert-deftest drover-claude-code-ide-test-background-shell ()
   "A shell left running ends the turn, acknowledged or not: the CLI tells it once no turn runs.

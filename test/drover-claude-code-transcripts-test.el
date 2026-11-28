@@ -945,6 +945,47 @@ whose turn ended with work left is done, the work its background."
       (drover-claude-code-transcripts-test-scan)
       (should-not (drover-claude-code-transcripts-background "tasks")))))
 
+(ert-deftest drover-claude-code-transcripts-test-retry-and-wait-kind ()
+  "A turn the CLI retries a request of retries, as its transcript tells, until it goes on.
+A session waiting in another terminal asks what its live record tells,
+a permission or a question, as the CLI sorts its waits."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (start 1790000100.0)
+           (file (drover-fixture-claude "retry" project))
+           (records nil))
+      (drover-fixture-claude "asks" project)
+      (drover-fixture-claude-append
+       file
+       (drover-fixture-claude-user "retry" project start "Go on")
+       (drover-fixture-line :type "system" :subtype "api_error" :level "error" :isSidechain :false
+                            :error (list :message "429 rate" :formatted "429 Rate limited" :status 429)
+                            :retryInMs 60000 :retryAttempt 2 :maxRetries 10
+                            :timestamp (drover-fixture-time (+ start 5)) :sessionId "retry"))
+      (drover-claude-code-transcripts-test-scan)
+      (cl-letf (((symbol-function 'drover-claude-code-pid-session)
+                 (lambda (pid) (alist-get pid records))))
+        (setq records '((4242 (waitingFor . "input needed")) (4343 (waitingFor . "permission prompt"))))
+        (drover-claude-code-transcripts--agents-listed
+         (drover-claude-code-transcripts--parse-agents
+          "[{\"kind\":\"interactive\",\"sessionId\":\"retry\",\"status\":\"busy\",\"pid\":4141,\"id\":\"r1\"},
+            {\"kind\":\"interactive\",\"sessionId\":\"asks\",\"status\":\"waiting\",\"pid\":4242,\"id\":\"a1\"}]"))
+        (drover-changed-now)
+        (let ((session (drover-find 'claude-code "retry")))
+          (should (eq (drover-session-status session) 'retrying))
+          (should (equal (drover-session-detail session)
+                         (format "retry 2 at %s: 429 Rate limited"
+                                 (format-time-string "%H:%M" (+ start 65))))))
+        (let ((session (drover-find 'claude-code "asks")))
+          (should (eq (drover-session-status session) 'waiting))
+          (should (equal (drover-session-requests session)
+                         '((:kind question :summary "input needed in another terminal: claude attach a1")))))
+        ;; The retry went: a reply came after it.
+        (drover-fixture-claude-append file (drover-fixture-claude-assistant "retry" project (+ start 70) "Done."))
+        (drover-claude-code-transcripts-test-scan)
+        (drover-changed-now)
+        (should (eq (drover-session-status (drover-find 'claude-code "retry")) 'working))))))
+
 (ert-deftest drover-claude-code-transcripts-test-interactive-agent-status ()
   "Interactive sessions report status; a shell left running ends the turn, its work told."
   (drover-claude-code-transcripts-test-with

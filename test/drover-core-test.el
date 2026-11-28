@@ -2075,7 +2075,6 @@ running, or a session another frame shows without the focus, is not."
   (drover-test-with-backend nil
     (let* ((drover--running t)
            (drover--seen-asked (make-hash-table :test #'equal))
-           (drover--unseen-failures (make-hash-table :test #'equal))
            (shown nil)
            (drover-test-calls nil))
       (cl-letf (((symbol-function 'drover-looked-at-sessions) (lambda () shown)))
@@ -2119,35 +2118,6 @@ running, or a session another frame shows without the focus, is not."
         ;; The other turn ended of its own: news.
         (should (equal (marked) '("s")))
         (should-not (gethash '(fake . "s") drover--interrupted))))))
-
-(ert-deftest drover-test-unseen-failure-outlives-success ()
-  "A failure the user did not see stays failed past a later success, until seen."
-  (let ((drover--unseen-failures (make-hash-table :test #'equal)))
-    (cl-flet ((taken (status &optional detail)
-                (drover--with-unseen-failure (drover-test-session "s" :status status :detail detail
-                                                                  :since (if detail 10.0 20.0)))))
-      (should (eq (drover-session-status (taken 'done)) 'done))
-      (should (eq (drover-session-status (taken 'failed "Overloaded")) 'failed))
-      (let ((later (taken 'done)))
-        (should (eq (drover-session-status later) 'failed))
-        (should (equal (drover-session-detail later) "Overloaded"))
-        (should (eql (drover-session-since later) 10.0)))
-      ;; A turn running shows as it is.
-      (should (eq (drover-session-status (taken 'working)) 'working))
-      (should (eq (drover-session-status (taken 'done)) 'failed))
-      ;; Seen, its front end tells it idle: the failure is forgotten.
-      (should (eq (drover-session-status (taken 'idle)) 'idle))
-      (should (eq (drover-session-status (taken 'done)) 'done))
-      ;; Marked seen through drover, too.
-      (taken 'failed "Again")
-      (cl-letf (((symbol-function 'drover--act) #'ignore))
-        (drover-mark-seen (drover-test-session "s" :status 'failed)))
-      (should (eq (drover-session-status (taken 'done)) 'done))
-      ;; Another host's sessions are their owner's.
-      (should (eq (drover-session-status
-                   (drover--with-unseen-failure (drover-test-session "r" :status 'failed :host "core")))
-                  'failed))
-      (should-not (gethash (drover-session-key (drover-test-session "r" :host "core")) drover--unseen-failures)))))
 
 (ert-deftest drover-test-turn-predicates ()
   "Each question asked of a session's turn has one answer, whatever its front end."

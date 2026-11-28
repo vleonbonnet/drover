@@ -318,6 +318,21 @@ The CLI records it, by PID, under `drover-claude-code-sessions-directory'."
   "Return the identifier of the session the Claude Code process PID runs, or nil."
   (alist-get 'sessionId (drover-claude-code-pid-session pid)))
 
+(defconst drover-claude-code-wait-kinds
+  '(("permission prompt" . permission) ("sandbox request" . permission)
+    ("worker request" . permission) ("goal proposal" . permission)
+    ("input needed" . question))
+  "The kind of request each wait the CLI's live record tells stands for.
+As the CLI itself sorts its waits (waitingFor), for the viewers it
+tells them to: a permission it asks, or a question.")
+
+(defun drover-claude-code-wait-kind (waiting-for)
+  "Return the kind of request WAITING-FOR stands for, `permission' or `question'.
+WAITING-FOR is what the CLI's live record tells it waits for (see
+`drover-claude-code-wait-kinds'); a wait it does not sort, such as a
+dialog open, is a permission's."
+  (or (alist-get waiting-for drover-claude-code-wait-kinds nil nil #'equal) 'permission))
+
 (defun drover-claude-code-run-state (state)
   "Return the program state of Claude Code's live STATE, or nil when unknown.
 Interactive sessions report `status', background agents `state'.  A

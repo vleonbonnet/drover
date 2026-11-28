@@ -612,6 +612,26 @@ notification without a status comes while the task runs.  The newest
         (forward-line 1))))
   (last tasks drover-claude-code-transcripts--task-limit))
 
+(defun drover-claude-code-transcripts--retry (beg end)
+  "Return the newest retry the records between BEG and END tell, or nil.
+The CLI records each request it retries after an error of the API, as
+it waits: a plist of :time, when it recorded it, :attempt, :at, when
+the retry goes, both float times, and :message, the error."
+  (when-let* ((record (drover-transcript-last
+                       "\"subtype\":\"api_error\""
+                       (lambda (record)
+                         (and (equal (alist-get 'type record) "system")
+                              (numberp (alist-get 'retryInMs record))
+                              (not (alist-get 'isSidechain record))))
+                       beg end))
+              (time (drover-transcript-time (alist-get 'timestamp record))))
+    (let ((error (alist-get 'error record)))
+      (list :time time
+            :attempt (alist-get 'retryAttempt record)
+            :at (+ time (/ (alist-get 'retryInMs record) 1000.0))
+            :message (and (drover-json-object-p error)
+                          (drover-transcript-text (or (alist-get 'formatted error) (alist-get 'message error))))))))
+
 (defun drover-claude-code-transcripts--merge (data told)
   "Return DATA with every member of TOLD, a plist, put in, nil ones included.
 How a conversation stands is told whole: an error of a turn before does
@@ -908,6 +928,10 @@ conversation again.  Its titles are read as
                       (drover-claude-code-transcripts--merge data recent)
                       (drover-claude-code-transcripts--settle-titles
                        (or title (plist-get recent :ai-title)) (car names) size tail grown before)))
+          ;; A retry stands while no message came after it.
+          (let ((retry (or (drover-claude-code-transcripts--retry tail (point-max)) (plist-get data :retry))))
+            (setq data (plist-put data :retry (and retry (> (plist-get retry :time) (or (plist-get data :updated) 0))
+                                                   retry))))
           ;; Read first, its tail alone tells them: older ones went unseen.
           (setq data (plist-put data :tasks (drover-claude-code-transcripts--tasks
                                              tail (point-max) (and grown (plist-get before :tasks))))))
@@ -1008,13 +1032,18 @@ it is idle."
                             tasks))))
     (pcase (and (not background) (drover-claude-code-run-state state))
       ('working
-       (list 'working nil (concat "working " where)))
+       (if-let* ((retry (and data (plist-get data :retry))))
+           (list 'retrying nil (drover-retry-detail (plist-get retry :attempt) (plist-get retry :at)
+                                                    (plist-get retry :message)))
+         (list 'working nil (concat "working " where))))
       ('blocked
-       (list 'waiting
-             (list (list :kind 'permission
-                         :summary (format "waits %s: claude attach %s" where
-                                          (or (plist-get agent :short) id))))
-             nil))
+       (let ((waiting (alist-get 'waitingFor (drover-claude-code-pid-session (plist-get agent :pid)))))
+         (list 'waiting
+               (list (list :kind (drover-claude-code-wait-kind waiting)
+                           :summary (format "%s %s: claude attach %s"
+                                            (or (and (stringp waiting) (drover-bound-line waiting 80)) "waits")
+                                            where (or (plist-get agent :short) id))))
+               nil)))
       (_ (pcase (and data (drover-claude-code-transcripts--unseen data))
            ('done (list 'done nil (drover-background-detail background) background))
            ('failed (list 'failed nil (plist-get data :error) background))
@@ -1255,18 +1284,28 @@ report back."
                      (plist-get (cdr task) :title)))
               (plist-get data :tasks))))
 
+(defun drover-claude-code-transcripts-retry (id)
+  "Return the retry the turn of conversation ID waits for, or nil.
+A plist of :attempt, :at and :message, as its transcript tells it (see
+`drover-claude-code-transcripts--retry'): none once a message came
+after it."
+  (plist-get (drover-claude-code-transcripts--data id) :retry))
+
 (defun drover-claude-code-transcripts--recorded-turn (id &optional since)
   "Return how the newest turn of conversation ID stands, as its transcript tells.
 A plist of :ended, what `drover-claude-code-transcripts-turn-ended'
 tells, the turn's end or nil while it runs, :current, nil while the
-transcript changed since read, and :background, its tasks started at
-SINCE or after (see `drover-claude-code-transcripts-background').  Nil
-when it was never read.  The backend's :recorded-turn."
+transcript changed since read, :background, its tasks started at
+SINCE or after (see `drover-claude-code-transcripts-background'), and
+:retry, the retry it waits for (see
+`drover-claude-code-transcripts-retry').  Nil when it was never read.
+The backend's :recorded-turn."
   (let ((ended (drover-claude-code-transcripts-turn-ended id)))
     (when (drover-claude-code-transcripts--data id)
       (list :ended (and (consp ended) ended)
             :current (not (eq ended 'unknown))
-            :background (drover-claude-code-transcripts-background id since)))))
+            :background (drover-claude-code-transcripts-background id since)
+            :retry (drover-claude-code-transcripts-retry id)))))
 
 (defun drover-claude-code-transcripts-turn-ended (id)
   "Return how the newest turn of conversation ID ended, as its transcript tells.
@@ -1521,8 +1560,8 @@ the older ones; the sessions Claude Code runs elsewhere are asked for."
 (defun drover-claude-code-transcripts--parse-agents (json)
   "Return the sessions JSON, the output of \"claude agents --json\", lists.
 A hash table mapping each conversation to a plist of :kind, :state,
-:short, its identifier for \"claude attach\", :name, and :started, when
-its process started, as a float time."
+:short, its identifier for \"claude attach\", :name, :pid, its process,
+and :started, when its process started, as a float time."
   (let ((table (make-hash-table :test #'equal)))
     (dolist (entry (let ((value (json-parse-string json :object-type 'alist :array-type 'list
                                                    :null-object nil :false-object nil)))
@@ -1533,6 +1572,7 @@ its process started, as a float time."
         (puthash id (list :kind (alist-get 'kind entry)
                           :state (or (alist-get 'status entry) (alist-get 'state entry))
                           :short (alist-get 'id entry) :name (alist-get 'name entry)
+                          :pid (alist-get 'pid entry)
                           :started (let ((started (alist-get 'startedAt entry)))
                                      (and (numberp started) (/ started 1000.0))))
                  table)))

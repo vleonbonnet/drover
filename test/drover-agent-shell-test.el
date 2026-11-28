@@ -65,7 +65,6 @@ isolated, engines read their local state from the throwaway homes of
            (drover--changed-all nil)
            (drover--changed-applied nil)
            (drover--index nil)
-           (drover--unseen-failures (make-hash-table :test #'equal))
            (drover--seen-asked (make-hash-table :test #'equal))
            (drover-changed-hook nil)
            (drover--closing nil)
@@ -318,7 +317,6 @@ effort for a model without effort."
         (drover--changed-all nil)
         (drover--changed-applied nil)
         (drover--index nil)
-        (drover--unseen-failures (make-hash-table :test #'equal))
         (drover--seen-asked (make-hash-table :test #'equal))
         (drover-agent-shell--gemini-registered nil))
     (unwind-protect
@@ -1686,6 +1684,38 @@ loading it."
           (should (eq (buffer-local-value 'drover-agent-shell--in-turn shell) t))
           (should-not (buffer-local-value 'drover-agent-shell--quiet-timer shell)))))))
 
+(ert-deftest drover-agent-shell-test-pending-prompts ()
+  "The prompts a shell holds unsent are told, and one is withdrawn to be edited.
+Those its queue holds and those drover set aside as it interrupted a
+turn alike; one alone goes at once, of several the one read."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code))
+          (edited nil))
+      (cl-letf (((symbol-function 'drover-prompt-edit-for)
+                 (lambda (session text) (push (list (drover-session-buffer session) text) edited)))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt choices &rest _) (car (nth 1 choices)))))
+        (let ((session (drover-agent-shell-test-session shell)))
+          (should (= (drover-pending-prompts session) 0))
+          (with-current-buffer shell
+            (setq drover-agent-shell--held (list "set aside"))
+            (map-put! agent-shell--state :pending-prompts (list "first" "second")))
+          (should (= (drover-pending-prompts session) 3))
+          ;; Of several, the one read: the second listed.
+          (drover-agent-shell--edit-pending session)
+          (should (equal edited (list (list shell "first"))))
+          (should (equal (with-current-buffer shell (map-elt agent-shell--state :pending-prompts))
+                         '("second")))
+          (should (= (drover-pending-prompts session) 2))
+          ;; Its turn stays open while it holds them.
+          (should (drover-session-turn-open-p (drover-agent-shell-test-session shell)))
+          (with-current-buffer shell
+            (setq drover-agent-shell--held nil))
+          (drover-agent-shell--edit-pending session)
+          (should (equal (car edited) (list shell "second")))
+          (should (= (drover-pending-prompts session) 0))
+          (should-error (drover-agent-shell--edit-pending session) :type 'user-error))))))
+
 (ert-deftest drover-agent-shell-test-status-ended-turns ()
   "A turn ending unseen is done or failed until seen; a cancelled one is not."
   (drover-agent-shell-test-with
@@ -1700,8 +1730,7 @@ loading it."
       (drover-agent-shell-test-emit shell 'input-submitted :prompt "again")
       (drover-agent-shell-test-emit shell 'error :code -32603 :message "Overloaded")
       (should (equal (drover-agent-shell-test-status shell) '(failed "Overloaded" nil)))
-      ;; The shell tells the later success: drover keeps the failure
-      ;; unseen (see `drover--with-unseen-failure').
+      ;; The newest turn's end is told, as every front end tells it.
       (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
       (should (equal (drover-agent-shell-test-status shell) '(done nil nil)))
       (drover-agent-shell--mark-seen (drover-agent-shell-test-session shell))
@@ -1729,8 +1758,7 @@ A frame without the focus shows nothing to the user."
     (let ((shell (drover-agent-shell-test-followed 'claude-code "front"))
           (viewport (generate-new-buffer "front [viewport]"))
           (drover--running t)
-          (drover--seen-asked (make-hash-table :test #'equal))
-          (drover--unseen-failures (make-hash-table :test #'equal)))
+          (drover--seen-asked (make-hash-table :test #'equal)))
       (push viewport drover-agent-shell-test--buffers)
       (drover-agent-shell-test-with-focus shell
         (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")

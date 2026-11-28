@@ -125,6 +125,7 @@
 (declare-function agent-shell--prompt-queue-display "ext:agent-shell-prompt-queue" t)
 (declare-function agent-shell--prompt-queue-process-next "ext:agent-shell-prompt-queue" ())
 (declare-function agent-shell--start "ext:agent-shell" t)
+(declare-function drover-prompt-edit-for "drover-prompt" (session text))
 (declare-function agent-shell--state "ext:agent-shell" ())
 (declare-function agent-shell--stop-reason-description "ext:agent-shell" (stop-reason))
 (declare-function agent-shell-buffers "ext:agent-shell" ())
@@ -976,7 +977,14 @@ The value is a plist of :status, :since, :detail and :requests, as
            (list :status 'waiting
                  :since (seq-some #'car requests)
                  :requests (mapcar #'cdr requests))))
-        ('busy (list :status 'working :since drover-agent-shell--turn-start))
+        ('busy
+         (if-let* ((retry (plist-get (drover-recorded-turn (drover-agent-shell--engine)
+                                                           (map-nested-elt state '(:session :id)))
+                                     :retry)))
+             (list :status 'retrying :since drover-agent-shell--turn-start
+                   :detail (drover-retry-detail (plist-get retry :attempt) (plist-get retry :at)
+                                                (plist-get retry :message)))
+           (list :status 'working :since drover-agent-shell--turn-start)))
         ((guard (eq drover-agent-shell--in-turn 'unprompted))
          (list :status 'working :since drover-agent-shell--turn-start
                :detail "going on with what its background work reported"))
@@ -1099,8 +1107,8 @@ redraw drover runs once backends are quiet.")
 (defun drover-agent-shell--end-turn (status detail)
   "Note that the current shell's turn ended with STATUS and DETAIL.
 STATUS is `done' or `failed'.  It stays to be seen: drover marks it
-seen as the user looks at the shell (see `drover--see-looked-at'), and
-keeps a failure unseen past a later success."
+seen as the user looks at the shell (see `drover--see-looked-at').  The
+newest turn's end is told, as every front end tells it."
   (setq drover-agent-shell--outcome (list :status status :detail detail :time (float-time))))
 
 (defun drover-agent-shell--handed-back (how)
@@ -1462,6 +1470,52 @@ interrupted again meanwhile keeps them aside until it ends."
         (cond ((shell-maker-busy))
               ((equal reason "end_turn") (agent-shell--prompt-queue-process-next))
               (t (agent-shell--prompt-queue-display)))))))
+
+(defun drover-agent-shell--queued (buffer)
+  "Return the prompts the shell of BUFFER holds unsent, oldest first.
+Those its queue holds, to go once its turn ends, and those drover set
+aside as it interrupted a turn (see `drover-agent-shell--held')."
+  (with-current-buffer buffer
+    (append (seq-filter #'stringp drover-agent-shell--held)
+            (seq-filter #'stringp (map-elt agent-shell--state :pending-prompts)))))
+
+(defun drover-agent-shell--pending-prompts (session)
+  "Return how many prompts the shell of SESSION holds unsent, maybe 0.
+See `drover-agent-shell--queued'.  The backend's :pending-prompts."
+  (if-let* ((buffer (drover-session-buffer session)))
+      (length (drover-agent-shell--queued buffer))
+    0))
+
+(defun drover-agent-shell--edit-pending (session)
+  "Withdraw a prompt the shell of SESSION holds unsent, read when several, to edit.
+It leaves the shell's queue, and goes to drover's prompt, set to go to
+SESSION (see `drover-prompt-edit-for').  The backend's :edit-pending."
+  (let* ((buffer (drover-agent-shell--live-buffer session))
+         (queued (drover-agent-shell--queued buffer)))
+    (unless queued
+      (user-error "%s holds no prompt unsent" (drover-session-display-title session)))
+    (let* ((choices (seq-map-indexed (lambda (text index)
+                                       (cons (format "%d: %s" (1+ index) (drover-bound-line text 70)) index))
+                                     queued))
+           (index (if (cdr queued)
+                      (alist-get (completing-read "Edit the prompt: " choices nil t) choices nil nil #'equal)
+                    0))
+           (text (nth index queued)))
+      (with-current-buffer buffer
+        (let ((held (length (seq-filter #'stringp drover-agent-shell--held))))
+          (if (< index held)
+              (setq drover-agent-shell--held (drover-agent-shell--without text drover-agent-shell--held))
+            (map-put! agent-shell--state :pending-prompts
+                      (drover-agent-shell--without text (map-elt agent-shell--state :pending-prompts))))))
+      (drover-backend-changed 'agent-shell (drover-session-id session))
+      (drover-prompt-edit-for session text))))
+
+(defun drover-agent-shell--without (text list)
+  "Return LIST without its first element `equal' to TEXT."
+  (let ((position (seq-position list text)))
+    (if position
+        (append (seq-take list position) (seq-drop list (1+ position)))
+      list)))
 
 (defun drover-agent-shell--mark-seen (session)
   "Mark the ended turn of SESSION seen."
@@ -1913,6 +1967,8 @@ see `drover-recorded-run'.  The backend's :caches."
    :options #'drover-agent-shell--options
    :settable #'drover-agent-shell--settable
    :blocker #'drover-agent-shell--blocker
+   :pending-prompts #'drover-agent-shell--pending-prompts
+   :edit-pending #'drover-agent-shell--edit-pending
    :submit #'drover-agent-shell--deliver)
   ;; Another package may describe Gemini CLI better: keep its registration.
   (unless (memq 'gemini-cli (drover-engines))

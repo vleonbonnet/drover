@@ -95,7 +95,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 36))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 37))
   (load "drover-core" nil t))
 
 ;; Recent additions to opencode.el.
@@ -720,13 +720,7 @@ tells unless STATUS tells more (see `drover-background-detail')."
     ((or 'done 'idle) (drover-background-detail background))
     ('retrying
      (when-let* ((retry (plist-get entry :retry)))
-       (let ((attempt (plist-get retry :attempt))
-             (at (plist-get retry :at))
-             (message (plist-get retry :message)))
-         (concat "retry"
-                 (and attempt (format " %d" attempt))
-                 (and at (concat " at " (format-time-string "%H:%M" at)))
-                 (and message (concat ": " message))))))))
+       (drover-retry-detail (plist-get retry :attempt) (plist-get retry :at) (plist-get retry :message))))))
 
 (defun drover-opencode--run (entry directory)
   "Return what registry ENTRY runs, as arguments of `drover-session-create'.
