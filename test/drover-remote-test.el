@@ -288,7 +288,7 @@ have drover's own heartbeat; a test of silent peers sets
                   :context-tier '(near 200000 "2×") :detail "Busy\nreally" :engine 'opencode
                   :engine-id "ses_1" :cache-expires 400.0 :cache-ttl 300 :cache-tokens 10
                   :cache-prompt-tokens 20 :agent-display agent :context-estimated t :archived 300.0
-                  :changes '(12 nil 3) :background '("Probe" "npm run dev")))
+                  :changes '(12 nil 3) :background '("Probe" "npm run dev") :background-work t))
          (decoded (drover-remote-test--roundtrip record nil '(opencode . "ses_0") 10)))
     (should (equal (drover-session-id decoded) '(opencode . "ses_1")))
     (should (eq (drover-session-backend decoded) 'remote:core))
@@ -300,7 +300,7 @@ have drover's own heartbeat; a test of silent peers sets
     (dolist (slot '(title directory project branch status requests agent model effort effort-default
                           provider-name context-tokens context-limit context-tier detail engine
                           engine-id cache-ttl cache-tokens cache-prompt-tokens context-estimated changes
-                          background))
+                          background background-work))
       (should (equal (cl-struct-slot-value 'drover-session slot decoded)
                      (cl-struct-slot-value 'drover-session slot record))))
     ;; The owner's clock is 10 s ahead of this host's.
@@ -1896,6 +1896,23 @@ leading back to what holds it would print it again from each."
       (drover-set-notify (drover-remote-test-session "s1") nil)
       (drover-remote-test-wait (lambda () (not (drover-notify-p (drover-remote-test-session "s1")))))
       (should-not (drover-notify-p (drover-remote-test-session "s1"))))))
+
+(ert-deftest drover-remote-test-background-work ()
+  "Another host keeps whether its sessions' work left running keeps them working."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-synced 2)
+    (let ((session (drover-remote-test-session "s1")))
+      (should-not (drover-background-work-chosen-p session))
+      (should (drover-background-work-settable-p session))
+      (drover-set-background-work session t)
+      (drover-remote-test-wait (lambda () (drover-background-work-chosen-p (drover-remote-test-session "s1"))))
+      (should-not (drover-background-work-chosen-p (drover-remote-test-session "s0")))
+      ;; Nothing kept here.
+      (should (zerop (hash-table-count (drover--choices-table (drover--background-work-choice)))))
+      (drover-set-background-work (drover-remote-test-session "s1") nil)
+      (drover-remote-test-wait (lambda () (not (drover-background-work-chosen-p (drover-remote-test-session "s1"))))))))
 
 (defun drover-remote-test-archived (id)
   "Return this host's record of the agent's archived session ID, once fetched."

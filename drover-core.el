@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 37
+(defconst drover-core-generation 38
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -759,7 +759,11 @@ A list of one line each, such as the title of a subagent or a shell
 run in the background, oldest first: its agent goes on with it once it
 reports back, in a turn of its own.  The session's turn ended, so its
 status is not one of `drover-active-statuses'; waiting for its result
-waits for that work too (see `drover-session-busy-p')."))
+waits for that work too (see `drover-session-busy-p').")
+  (background-work nil :documentation "Non-nil when the user chose that work left running keeps it working.
+As kept for its conversation (see `drover-toggle-background-work'): its
+ended turn with BACKGROUND then shows as working until that work ends;
+a session of another host carries its owner's choice."))
 
 (drover-note-layout 'drover-session)
 
@@ -842,7 +846,8 @@ itself when within those, and of all the slots of a `drover-session'
 now (see `drover--whole-record'), unless `drover-brief-function' gives
 it a brief (see `drover--briefed'), `drover-changes-function' what it
 changed (see `drover--with-changes') or the user chose otherwise of its
-notifications (see `drover--with-notify')."
+notifications (see `drover--with-notify') or of its work left running
+\(see `drover--with-background-work')."
   (if (not (drover-session-p record))
       record
     (let* ((whole (drover--whole-record record))
@@ -903,7 +908,8 @@ notifications (see `drover--with-notify')."
                                 (plist-put (copy-sequence request) :summary (drover-bound-text summary))
                               request)))
                         requests))))
-      (drover--with-notify (drover--with-changes (drover--briefed (or copy record)))))))
+      (drover--with-background-work
+       (drover--with-notify (drover--with-changes (drover--briefed (or copy record))))))))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -7319,6 +7325,123 @@ Interactively, SESSION is the session at point."
                        (lambda () (message "%s: notifications %s" title (if on "on" "off")))
                        (lambda (why)
                          (message "%s: notifications not turned %s: %s" title (if on "on" "off") why)))))
+
+;;;; Work left running, working or not
+
+;; Once a turn ended with work left running in the background, the
+;; session is done, then idle, as any turn (see `drover-session-status').
+;; The user may choose otherwise for a conversation: its work then keeps
+;; it working, until the work ended.  The host owning the session keeps
+;; the choice, as it tells the session's status, desktop and phones
+;; alike; a record carries it (the slot `background-work'), and changing
+;; it is an action the owner performs (`:set-background-work').
+
+(defconst drover-background-work-limit 1000
+  "How many conversations whose work left running keeps them working are kept.")
+
+(defvar drover--background-work-on nil
+  "Conversations whose work left running keeps them working, or nil.
+A hash table of their keys to when the choice was made, read from
+`drover-background-work-file' the first time.")
+
+(defvar drover--background-work-copies (make-hash-table :test #'eq :weakness 'key)
+  "The copies of records the choice of their work left running made, by record.")
+
+(defun drover-background-work-file ()
+  "Return the file of the sessions their background work keeps working."
+  (expand-file-name "background-work.eld" drover-state-directory))
+
+(defun drover--background-work-choice ()
+  "Return the description of the choices of work left running.
+For `drover--choices-table'."
+  (list :variable 'drover--background-work-on :file (drover-background-work-file)
+        :key-p #'drover--notify-key-p
+        :what "the sessions their background work keeps working"
+        :description "Sessions their work left running keeps working"
+        :limit drover-background-work-limit))
+
+(defun drover-background-work-chosen-p (session)
+  "Return non-nil when work SESSION's ended turn left running keeps it working.
+As the user chose for its conversation (see
+`drover-toggle-background-work'), off by default; a session of another
+host tells its owner's choice (see `drover-session-background-work')."
+  (if (drover-session-host session)
+      (and (drover-session-background-work session) t)
+    (and (gethash (drover--conversation-key session)
+                  (drover--choices-table (drover--background-work-choice)))
+         t)))
+
+(defun drover--with-background-work (record)
+  "Return RECORD, or a copy following the choice of its work left running.
+A record of this host tells the choice (the slot `background-work'),
+and, chosen, its ended turn with work left running (see
+`drover-session-background') shows as working until the work ended,
+the work its detail still.  A copy is made once per record and choice;
+a record of another host tells its owner's."
+  (if (or (not (drover-session-p record)) (drover-session-host record))
+      record
+    (let* ((on (drover-background-work-chosen-p record))
+           (working (and on (drover-session-background record)
+                         (memq (drover-session-status record) '(done idle)))))
+      (if (and (eq on (and (drover-session-background-work record) t)) (not working))
+          record
+        (let ((made (gethash record drover--background-work-copies)))
+          (if (and made (eq (car made) on))
+              (cdr made)
+            (let ((copy (copy-sequence record)))
+              (setf (drover-session-background-work copy) on)
+              (when working
+                (setf (drover-session-status copy) 'working))
+              (puthash record (cons on copy) drover--background-work-copies)
+              copy)))))))
+
+(defun drover-background-work-settable-p (session)
+  "Return non-nil when the user may choose of SESSION's background work.
+Whether it keeps SESSION working (see `drover-toggle-background-work'):
+always for a session of this host; for one of another host, when its
+owner performs the action for this host now (see `drover-supports-p')."
+  (or (null (drover-session-host session))
+      (drover-supports-p session :set-background-work)))
+
+(defun drover-set-background-work (session on &optional then else)
+  "Have work SESSION's ended turn left running keep it working when ON, else not.
+The choice is remembered for SESSION's conversation across Emacs
+sessions.  Of a session of another host, its owner keeps the choice and
+is asked to make it: THEN is called with no argument once it did, ELSE
+with a line once it refused or failed.  Of a session of this host,
+THEN is called at once."
+  (cond
+   ((null (drover-session-host session))
+    (when (drover--choices-set (drover--background-work-choice) (drover--conversation-key session) on)
+      (drover-take-in-again (drover--notify-conversation-keys session)))
+    (when then (funcall then)))
+   (t
+    (condition-case err
+        (drover-backend-call session :set-background-work (and on t) (or then #'ignore)
+                             (or else (lambda (message)
+                                        (drover-warn "Could not choose for %s: %s"
+                                                     (drover-session-display-title session) message))))
+      (user-error (if else
+                      (funcall else (drover-error-message err))
+                    (signal (car err) (cdr err))))))))
+
+(defun drover-toggle-background-work (session)
+  "Toggle whether work SESSION's ended turn left running keeps it working.
+Off, the default, a turn that ended with a subagent or a shell running
+in the background is done, then idle, as any turn: its reply waits for
+you, the work for its report.  On, the session shows as working until
+that work ended, as its agent goes on with the report.  The choice is
+SESSION's conversation's, remembered across Emacs sessions; a session
+of another host's owner keeps it.  Interactively, SESSION is the
+session at point."
+  (interactive (list (drover-session-at-point)))
+  (let ((on (not (drover-background-work-chosen-p session)))
+        (title (drover-session-display-title session)))
+    (drover-set-background-work session on
+                                (lambda () (message "%s: background work %s" title
+                                                    (if on "keeps it working" "leaves it idle")))
+                                (lambda (why)
+                                  (message "%s: background work unchanged: %s" title why)))))
 
 ;;;; Text the user sent
 

@@ -150,6 +150,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                             ("<tab>" . drover-build-and-go) ("h" . drover-handoff) ("*" . drover-items)
                             ("E" . drover-edit-pending-prompt) ("G" . drover-goal) ("K" . drover-interrupt) ("s" . drover-mark-seen)
                             ("w" . drover-toggle-auto-bury) ("!" . drover-toggle-notify)
+                            ("J" . drover-toggle-background-work)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive-toggle)
                             ("Z" . drover-wrap-up) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
@@ -879,7 +880,8 @@ the prefix of the other's, which would hide it."
                    ("i" . drover-prompt-attach) ("/" . drover-prompt-slash)
                    ("@" . drover-prompt-mention) ("t" . drover-prompt-revert)
                    ("T" . drover-prompt-revert-cancel) ("y" . drover-prompt-copy-block)
-                   ("w" . drover-toggle-auto-bury) ("!" . drover-toggle-notify)))
+                   ("w" . drover-toggle-auto-bury) ("!" . drover-toggle-notify)
+                   ("J" . drover-toggle-background-work)))
     (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch (car entry))) :command)
                 (cdr entry))))
   ;; The view settings, the View menu's.

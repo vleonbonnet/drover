@@ -316,6 +316,7 @@ are given again."
          (drover--archive-unwritten nil)
          (drover--archive-warned nil)
          (drover--notify-on nil)
+         (drover--background-work-on nil)
          (drover--auto-bury-off nil)
          (drover--choices-warned nil))
      (unwind-protect

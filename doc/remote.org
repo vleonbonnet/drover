@@ -1169,6 +1169,8 @@ The user chooses which sessions notify them as they come to need them (=!=, =dro
 |--------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | record =:notify=   | true when the user chose to be notified of the session's conversation there; left out otherwise.  It is the session's own: a subagent follows the top of its tree |
 | action =notify=    | args ={on: true or false}=, on the top of a tree, which the peer finds in its own index; the owner sets the choice (=drover-set-notify=) and answers at once    |
+| record =:background-work= | true when the user chose that work the session's ended turn left running keeps it working there; left out otherwise |
+| action =background-work=  | args ={on: true or false}=; the owner, which tells the session's status, sets the choice (=drover-set-background-work=) and answers at once |
 | =ops= =notify=     | told for every session of the owner's, which keeps a choice for each                                                                                           |
 | access             | =act= or =full=, as for =rename=                                                                                                                              |
 

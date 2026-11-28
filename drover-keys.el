@@ -88,7 +88,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 32))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 38))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -738,6 +738,7 @@ other lists."
   "s" #'drover-mark-seen
   "w" #'drover-toggle-auto-bury
   "!" #'drover-toggle-notify
+  "J" #'drover-toggle-background-work
   "u" #'drover-open-parent
   "c" #'drover-open-subagent
   "r" #'drover-rename
@@ -2379,6 +2380,18 @@ follows it, highlighted when on (see `drover-toggle-notify')."
                 (propertize "off" 'face 'transient-inactive-value))
             "")))
 
+(defun drover--dispatch-background-work-description ()
+  "Return the description of the background work's toggle in the dispatch menu.
+Whether work the turn of the session at point left running keeps it
+working follows it, highlighted when on (see
+`drover-toggle-background-work')."
+  (concat "Jobs keep working "
+          (if-let* ((session (drover-dispatch-session)))
+              (if (drover-background-work-chosen-p session)
+                  (propertize "on" 'face 'transient-value)
+                (propertize "off" 'face 'transient-inactive-value))
+            "")))
+
 (defun drover--dispatch-archive-description ()
   "Return the description of the archive's toggle in the dispatch menu.
 \"Unarchive\" when it restores the sessions it acts on, as
@@ -2725,7 +2738,14 @@ session chosen for it, else to one asked for, unshown."
                      :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-handoff-p)))
                     ;; A setting of the session at point: the menu stays, showing it.
                     ("!" drover--dispatch-notify-description drover-toggle-notify :transient t
-                     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-notify-settable-p)))]
+                     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-notify-settable-p)))
+                    ;; Shown while it matters: work left running, or the choice made.
+                    ("J" drover--dispatch-background-work-description drover-toggle-background-work
+                     :transient t
+                     :if (lambda () (drover-dispatch-session
+                                     nil (lambda (session) (or (drover-session-background session)
+                                                               (drover-background-work-chosen-p session)))))
+                     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-background-work-settable-p)))]
           drover--view-columns
           ;; Only while the menu acts on one of drover's lists, here or in
           ;; another window.  Moving stays in the menu, which follows the new

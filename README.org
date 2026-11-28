@@ -92,6 +92,8 @@ A value a former option was given before drover loaded goes to opencode.el's whe
 
 ** Notifications
 
+A turn that ends with a subagent or a shell still running in the background is done, then idle once seen, as any turn: its reply waits for you, and the list shows the work beside the session. =J= (=drover-toggle-background-work=) chooses otherwise for the session at point: its work then keeps it working until the work ends. Drover keeps the choice for the conversation, in =background-work.eld= of =drover-state-directory=, and the menu shows =Jobs keep working on= or =off=. A session of another host is that host's to show, which keeps the choice.
+
 =!= (=drover-toggle-notify=) chooses which sessions notify you as they come to need you. None does by default: the count and the list already show every session that needs you. The choice belongs to the top of a tree, so a subagent's requests follow its parent. Drover keeps it for the conversation, in =notify.eld= of =drover-state-directory=, and the menu shows =Notify on= or =off= beside the key. A session of another host is notified by that host, which keeps the choice: =!= asks that host to change it.
 
 =drover-notify-mode= shows these notifications on this host's desktop. Turn it on as drover starts, for instance with =(add-hook 'drover-start-hook #'drover-notify-mode)=. A session is told once it waits on a request, its turn failed or its turn ended unseen, and it stayed so for =drover-notify-delay= seconds (1 by default). It is not told while you look at it, nor for what needed you before you turned the choice or the mode on. Its notification goes once it no longer needs you, seen or answered. The phones this host pushes to get the same sessions (see [[*Pushes to a phone][Pushes to a phone]]).
@@ -155,6 +157,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 | =s= | =drover-mark-seen=         | mark its ended turn seen                                       |
 | =w= | =drover-toggle-auto-bury=  | keep its buffers shown once it has its turn, or bury them again (see =drover-bury-handed-off=) |
 | =!= | =drover-toggle-notify=     | have it notify you as it comes to need you, or stop (see [[*Notifications][Notifications]]) |
+| =J= | =drover-toggle-background-work= | have the work its ended turn left running, a subagent or a shell, keep it working, or leave it done, then idle (the default) |
 | =u= | =drover-open-parent=       | open its parent session                                        |
 | =c= | =drover-open-subagent=     | pick one of its subagent sessions and open it                  |
 | =r= | =drover-rename=            | rename it                                                      |

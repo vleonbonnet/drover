@@ -2119,6 +2119,38 @@ running, or a session another frame shows without the focus, is not."
         (should (equal (marked) '("s")))
         (should-not (gethash '(fake . "s") drover--interrupted))))))
 
+(ert-deftest drover-test-background-work-toggle ()
+  "A session's work left running keeps it working as the user chose, off by default.
+The choice is its conversation's, kept across Emacs sessions; a turn
+running, or none left running, shows as it is."
+  (drover-test-with-state
+    (drover-test-with-backend (list (drover-test-session "a" :status 'done :since 5.0 :engine-id "e-a"
+                                                         :background '("Probe"))
+                                    (drover-test-session "b" :status 'idle :engine-id "e-b"))
+      (cl-flet ((status (id) (drover-session-status (drover-index-session (cons 'fake id)))))
+        (should (eq (status "a") 'done))
+        (should-not (drover-background-work-chosen-p (drover-index-session '(fake . "a"))))
+        (should (drover-background-work-settable-p (drover-index-session '(fake . "a"))))
+        (drover-toggle-background-work (drover-index-session '(fake . "a")))
+        (drover-changed-now)
+        (should (eq (status "a") 'working))
+        (should (drover-session-background-work (drover-index-session '(fake . "a"))))
+        ;; Kept by conversation, read again.
+        (setq drover--background-work-on nil)
+        (should (drover-background-work-chosen-p (drover-index-session '(fake . "a"))))
+        ;; Its work ended: its turn shows as it ended.
+        (setq drover-test-sessions (list (drover-test-session "a" :status 'done :since 5.0 :engine-id "e-a")
+                                         (drover-test-session "b" :status 'idle :engine-id "e-b")))
+        (drover-backend-changed 'fake)
+        (drover-changed-now)
+        (should (eq (status "a") 'done))
+        ;; Chosen, no work left: idle as it is.
+        (drover-set-background-work (drover-index-session '(fake . "b")) t)
+        (drover-changed-now)
+        (should (eq (status "b") 'idle))
+        (drover-toggle-background-work (drover-index-session '(fake . "a")))
+        (should-not (drover-background-work-chosen-p (drover-index-session '(fake . "a"))))))))
+
 (ert-deftest drover-test-turn-predicates ()
   "Each question asked of a session's turn has one answer, whatever its front end."
   (drover-test-with-backend nil
@@ -2142,8 +2174,9 @@ running, or a session another frame shows without the focus, is not."
 (ert-deftest drover-test-session-record-keeps-its-layout ()
   "New slots of the session record come last, after those compiled code reads."
   (let ((slots (mapcar #'car (cdr (cl-struct-slot-info 'drover-session)))))
-    (should (equal (last slots 13) '(agent-display context-estimated archived host origin stale default-branch
-                                                   brief brief-recap changes brief-session notify background)))
+    (should (equal (last slots 14) '(agent-display context-estimated archived host origin stale default-branch
+                                                   brief brief-recap changes brief-session notify background
+                                                   background-work)))
     (should (equal (seq-take slots 4) '(backend id title directory)))))
 
 (ert-deftest drover-test-format-tokens ()
