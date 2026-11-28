@@ -415,7 +415,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
                   :requests '((:kind permission :id "per_1" :summary "bash: make test" :time 100.5)
                               (:kind question :id "frm_1" :summary "Which branch?" :time 110.0))
                   :outcome nil :error nil :idle 50.0 :viewed 50.0 :archived nil
-                  :created 10.0 :updated 120.25 :started 90.0))
+                  :created 10.0 :updated 130.0 :started 90.0 :activity 120.25))
     (drover-start)
     (drover-opencode-test-answer-projects)
     (let ((session (car (drover-sessions))))
@@ -435,6 +435,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
                      '((:kind permission :summary "bash: make test")
                        (:kind question :summary "Which branch?"))))
       (should (eql (drover-session-since session) 100.5))
+      ;; Its turns' activity, not the service's time of its last change.
       (should (eql (drover-session-updated session) 120.25))
       (should (eql (drover-session-created session) 10.0))
       ;; The registry knows nothing of prompt caches yet.
@@ -2285,8 +2286,8 @@ fetches are none, at once."
 
 (ert-deftest drover-opencode-test-search ()
   "The OpenCode backend has the service evaluate the whole query over each session, scoped."
-  (drover-opencode-test-with (list (list :id "ses_1" :created 10.0 :updated 20.0)
-                                   (list :id "ses_2" :created 10.0 :updated 30.0))
+  (drover-opencode-test-with (list (list :id "ses_1" :created 10.0 :updated 20.0 :activity 20.0)
+                                   (list :id "ses_2" :created 10.0 :updated 30.0 :activity 30.0))
     (let ((drover-opencode--projects '(((id . "prj_drover") (name . "drover") (worktree . "/w/drover"))
                                        ((id . "prj_other") (name . "other") (worktree . "/w/other"))))
           (results nil))

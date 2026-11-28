@@ -778,7 +778,10 @@ does again whenever it is sent."
                                      :summary (plist-get request :summary)))
                              (plist-get entry :requests))
            :since (opencode-state-since entry)
-           :updated (plist-get entry :updated)
+           ;; Its turns' activity, as every engine's: not a rename nor a model chosen.
+           :updated (if (fboundp 'opencode-state-activity)
+                        (opencode-state-activity entry)
+                      (plist-get entry :updated))
            :created (plist-get entry :created)
            :agent (plist-get entry :agent)
            ;; Plain until the agent catalog arrives, which redraws.
