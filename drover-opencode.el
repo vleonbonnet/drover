@@ -1015,11 +1015,21 @@ from the registry.  See `drover-opencode--fetch'.  The backend's
                               (setq drover-opencode--archived-ids ids)
                               (funcall callback
                                        (append sessions
-                                               (delq nil (mapcar (lambda (entry)
-                                                                   (and (not (gethash (plist-get entry :id) ids))
-                                                                        (drover-opencode--archived-above entry)
-                                                                        (drover-opencode--listed entry)))
-                                                                 (opencode-state-sessions)))))))))
+                                               (seq-keep #'drover-opencode--archived-with
+                                                         (seq-remove (lambda (entry) (gethash (plist-get entry :id) ids))
+                                                                     (opencode-state-sessions)))))))))
+
+(defun drover-opencode--archived-with (entry)
+  "Return the record of registry ENTRY, archived with the session above it, or nil.
+Nil unless it goes with an archived session (see
+`drover-opencode--archived-above'); its record then tells it archived
+when that session was, as drover tells the subagents it archives with
+their parents, so that lists dim it and it is restored with it."
+  (when-let* ((above (drover-opencode--archived-above entry))
+              (record (drover-opencode--listed entry)))
+    (let ((copy (copy-sequence record)))
+      (setf (drover-session-archived copy) (or (plist-get (opencode-state-get above) :archived) t))
+      copy)))
 
 (defun drover-opencode--left-archive (id)
   "Forget session ID among the archived ones fetched, once restored.

@@ -4770,14 +4770,26 @@ session of another host, which its host archives."
                 (drover-session-engine-key session)
                 t))))
 
+(defun drover--archived-with-parent-p (session)
+  "Return non-nil when SESSION, a subagent, is archived with a session above it.
+Archived by drover (see `drover--archived-above') or by its backend, as
+a parent the archive holds: a subagent goes there with its parent, and
+comes back with it, whatever archive holds them."
+  (and (drover-session-parent session)
+       (or (and (drover--archived-above session #'drover--parent-record) t)
+           (when-let* ((parent (or (drover--parent-record session)
+                                   (drover-find-archived (drover-session-backend session)
+                                                         (drover-session-parent session)))))
+             (and (drover-session-archived parent) t)))))
+
 (defun drover-unarchivable-p (session)
   "Return non-nil when SESSION is archived and may be restored.
-A subagent going with a conversation drover archived is restored with
-it, not alone (see `drover--archived-above')."
+A subagent archived with a session above it is restored with it, not
+alone (see `drover--archived-with-parent-p')."
   (or (and (drover--archive-entry session) t)
       (and (drover-session-archived session)
            (drover-supports-p session :unarchive)
-           (not (drover--archived-above session #'drover--parent-record)))))
+           (not (drover--archived-with-parent-p session)))))
 
 (defvar drover--front-end-backends)
 

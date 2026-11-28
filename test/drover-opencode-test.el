@@ -2200,6 +2200,12 @@ Lists show them under it, in the archived group."
           (funcall (plist-get drover-opencode-test-history-fetch :callback)
                    (drover-opencode-test--archived-infos "ses_root"))
           (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("ses_root" "ses_sub")))
+          ;; Archived with it, dimmed as it is, and restored with it, not alone.
+          (let ((sub (seq-find (lambda (session) (equal (drover-session-id session) "ses_sub"))
+                               (drover-archived-sessions))))
+            (should (eql (drover-session-archived sub) 3000.0))
+            (should-not (drover-unarchivable-p sub))
+            (should-not (drover-archivable-p sub)))
           (should (equal (mapcar #'drover-session-id (drover-known-sessions)) '("ses_live" "ses_root" "ses_sub")))
           (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-tree-shape (cdr group))))
                                  (drover-group-trees (drover-view-trees) 'status))
